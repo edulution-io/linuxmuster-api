@@ -15,7 +15,12 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, Response
 
 from security import AuthenticatedUser, RoleChecker
 from utils.checks import check_valid_school_or_404
-from .body_schemas import LinboBatchMacs, StartConfRawBody
+from .body_schemas import (
+    LinboBatchMacs,
+    LinboHostScanBody,
+    LinboWolBody,
+    StartConfRawBody,
+)
 
 
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
@@ -39,6 +44,11 @@ router = APIRouter(
 
 LINBO_DIR = Path("/srv/linbo")
 IMAGES_DIR = LINBO_DIR / "images"
+
+# A scan holds a worker thread until every host has answered or timed out, so the
+# host count is capped and the probes run wider than the library default of 20.
+MAX_HOSTS_PER_SCAN = 500
+SCAN_CONCURRENCY = 100
 
 
 def _parse_list_query(values: list[str], param_name: str, max_items: int) -> list[str]:
@@ -406,6 +416,195 @@ def dhcp_export_isc(
 
     exporter = LinboDhcpExporter()
     return exporter.get_isc_dhcp(school)
+
+
+# ── Host state ─────────────────────────────────────────────────────
+
+
+@router.post("/hosts/scan", name="Probe hosts for online status")
+def probe_hosts(
+    body: LinboHostScanBody,
+    school: str = "default-school",
+    who: AuthenticatedUser = Depends(RoleChecker("G")),
+):
+    """
+    ## Probe hosts over TCP and report which ones are online.
+
+    An empty MAC list scans every client of the school.
+
+    ### Access
+    - global-administrators
+
+    \f
+    :param body: MAC addresses to probe, empty for all clients of the school
+    :param school: School name (default: default-school)
+    """
+
+
+    check_valid_school_or_404(school)
+
+    if len(body.macs) > MAX_HOSTS_PER_SCAN:
+        raise HTTPException(status_code=400, detail=f"Maximum {MAX_HOSTS_PER_SCAN} MACs per request")
+
+    devices_mgr = Devices(school=school)
+    hosts = devices_mgr.get_hosts_by_macs(body.macs) if body.macs else devices_mgr.get_clients()
+
+    if not hosts:
+        raise HTTPException(status_code=404, detail="No hosts found")
+
+    # The cap above only covers an explicit list; an empty one resolves to every
+    # client of the school, which is unbounded and would hold a worker thread for
+    # the whole scan.
+    if len(hosts) > MAX_HOSTS_PER_SCAN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"School {school} has {len(hosts)} clients, more than the {MAX_HOSTS_PER_SCAN} a single scan allows",
+        )
+
+    return {
+        "hosts": scan_hosts_sync(hosts, concurrency=SCAN_CONCURRENCY),
+        "scannedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/wol", name="Wake hosts with a magic packet")
+def wake_hosts(
+    body: LinboWolBody,
+    who: AuthenticatedUser = Depends(RoleChecker("G")),
+):
+    """
+    ## Send Wake-on-LAN magic packets to a list of MAC addresses.
+
+    ### Access
+    - global-administrators
+
+    \f
+    :param body: MAC addresses to wake, with broadcast address, port and packet count
+    """
+
+
+    if not body.macs:
+        raise HTTPException(status_code=400, detail="At least one MAC address is required")
+
+    if len(body.macs) > MAX_HOSTS_PER_SCAN:
+        raise HTTPException(status_code=400, detail=f"Maximum {MAX_HOSTS_PER_SCAN} MACs per request")
+
+    return send_wol_bulk(
+        body.macs,
+        broadcast=str(body.broadcast) if body.broadcast else None,
+        port=body.port,
+        count=body.count,
+    )
+
+
+@router.get("/hosts/image-status", name="Last sync per host from the boot logs")
+def hosts_image_status(
+    who: AuthenticatedUser = Depends(RoleChecker("G")),
+):
+    """
+    ## Report the last applied image per host, read from the LINBO boot logs.
+
+    Hosts that never reported carry no entry.
+
+    ### Access
+    - global-administrators
+
+    \f
+    """
+
+
+    hosts = get_host_image_status()
+    return {"hosts": hosts, "total": len(hosts)}
+
+
+# ── Boot logs ──────────────────────────────────────────────────────
+
+
+@router.get("/boot-logs", name="List LINBO client boot logs")
+def list_boot_logs(
+    who: AuthenticatedUser = Depends(RoleChecker("G")),
+):
+    """
+    ## List the client boot logs, newest first.
+
+    ### Access
+    - global-administrators
+
+    \f
+    """
+
+
+    logs = LinboBootLogs().list_logs()
+    return {"logs": logs, "total": len(logs)}
+
+
+@router.get(
+    "/boot-logs/{filename}",
+    name="Read a LINBO client boot log",
+    response_class=PlainTextResponse,
+)
+def read_boot_log(
+    filename: str,
+    who: AuthenticatedUser = Depends(RoleChecker("G")),
+):
+    """
+    ## Read one boot log.
+
+    ### Access
+    - global-administrators
+
+    \f
+    :param filename: Name of the log file
+    """
+
+
+    try:
+        content = LinboBootLogs().read_log(filename)
+    except ValueError as e:
+        # read_log raises ValueError for an unsafe name and for a log over its size
+        # limit. Only the first is the caller's fault; a log the list endpoint just
+        # advertised is not a bad request.
+        status_code = 413 if "too large" in str(e).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"Boot log {filename} not found")
+
+    return PlainTextResponse(content=content)
+
+
+@router.delete("/boot-logs/{filename}", name="Delete a LINBO client boot log")
+def delete_boot_log(
+    filename: str,
+    who: AuthenticatedUser = Depends(RoleChecker("G")),
+):
+    """
+    ## Delete one boot log.
+
+    ### Access
+    - global-administrators
+
+    \f
+    :param filename: Name of the log file
+    """
+
+
+    try:
+        deleted = LinboBootLogs().delete_log(filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError:
+        # logrotate rotates and compresses this directory, so a log can disappear
+        # between delete_log's is_file() and its unlink(). Same answer as a log that
+        # was never there. FileNotFoundError is an OSError, so it is caught first.
+        raise HTTPException(status_code=404, detail=f"Boot log {filename} not found")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not delete boot log {filename}: {e}")
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Boot log {filename} not found")
+
+    return {"filename": filename, "status": "deleted"}
 
 
 # ── Image Manifest ─────────────────────────────────────────────────
