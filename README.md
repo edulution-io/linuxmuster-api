@@ -1,3 +1,10 @@
+> [!NOTE]
+> **This is the edulution fork of [linuxmuster-api](https://github.com/linuxmuster/linuxmuster-api).**
+> We build on the great work of the linuxmuster.net community. Maintaining our own
+> fork gives us the flexibility to ship security fixes and new features to edulution
+> installations quickly, and we actively contribute our changes back to the community
+> project. The packages are published at [package.edulution.io](https://package.edulution.io).
+
 # linuxmuster-api
 
 Linuxmuster API is the main evolution for the next linuxmuster.net's server, version 8.
@@ -5,7 +12,7 @@ Based on the wonderful [FastAPI](https://fastapi.tiangolo.com/), it will give th
 
 ## Installation
 
-Simply install the package `linumxuster-api7` from our [deb repository](https://github.com/linuxmuster/deb).
+Simply install the package `linuxmuster-api7` from the edulution package repository [package.edulution.io](https://package.edulution.io).
 
 After the installation, the `uvicorn` server should start automatically ans listen on port 8001.
 You can manage it via `systemctl`:
