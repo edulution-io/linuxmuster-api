@@ -151,3 +151,42 @@ def test_run_passes_the_api_user_to_linbo_remote(monkeypatch):
     )
 
     assert seen["run_user"] == "global-admin"
+
+
+@pytest.mark.parametrize("school", [None, ""])
+def test_a_school_administrator_without_school_sees_no_runs(log_dir, school):
+    nobody = AuthenticatedUser(dn="", user="x", role="schooladministrator", school=school)
+    for call in (
+        lambda: linbo_sync.get_runs(limit=50, who=nobody),
+        lambda: linbo_sync.get_run(run_id="mine", who=nobody),
+        lambda: linbo_sync.get_run_host_log(run_id="mine", hostname="abc-pc01", who=nobody),
+    ):
+        with pytest.raises(HTTPException) as error:
+            call()
+        assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("value", ["abc\n", "a b", "../x", ""])
+def test_path_patterns_reject_a_trailing_newline_and_odd_characters(value):
+    assert not linbo_sync.RUN_ID_PATTERN.fullmatch(value)
+    assert not linbo_sync.HOSTNAME_PATTERN.fullmatch(value)
+
+
+def test_the_real_school_hostname_rule_decides_what_a_school_sees(tmp_path, monkeypatch):
+    directory = tmp_path / "linbo-logs"
+    directory.mkdir()
+    monkeypatch.setattr(tools_config, "LINBO_LOG_PATH", str(directory))
+    (directory / "linbo-remote_runs.jsonl").write_text("\n".join([
+        record("pc01", "plain"), record("abc-pc01", "prefixed"), record("xyz-pc01", "other"),
+    ]) + "\n")
+
+    import linuxmusterTools.linbo.runs as runs_module
+
+    def fake_devices(school):
+        return Mock(devices=[{"hostname": "pc01"}])
+
+    monkeypatch.setattr(runs_module, "Devices", fake_devices)
+    default = AuthenticatedUser(dn="", user="d", role="schooladministrator", school="default-school")
+
+    assert [r["runId"] for r in linbo_sync.get_runs(limit=50, who=default)["runs"]] == ["plain"]
+    assert [r["runId"] for r in linbo_sync.get_runs(limit=50, who=ABC_ADMIN)["runs"]] == ["prefixed"]
