@@ -133,3 +133,48 @@ def test_every_route_with_a_group_id_is_covered():
         if "{group_id}" in route.path
     }
     assert with_group_id == covered
+
+
+# ── GRUB configs and users without a school ─────────────────────────────────
+
+
+@pytest.fixture
+def grub_reader(monkeypatch):
+    reader = Mock()
+    reader.get_configs_by_ids.return_value = {}
+    monkeypatch.setattr(linbo, "LinboGrubReader", Mock(return_value=reader))
+    return reader
+
+
+def test_configs_of_the_own_school_are_served(grub_reader):
+    linbo.get_configs(id=["abc__raum101"], who=ABC_ADMIN)
+    grub_reader.get_configs_by_ids.assert_called_once_with(["abc__raum101"])
+
+
+def test_configs_of_another_school_are_refused(grub_reader):
+    with pytest.raises(HTTPException) as error:
+        linbo.get_configs(id=["abc__raum101", "xyz__raum101"], who=ABC_ADMIN)
+    assert error.value.status_code == 403
+    grub_reader.get_configs_by_ids.assert_not_called()
+
+
+def test_a_global_administrator_reads_every_config(grub_reader):
+    linbo.get_configs(id=["xyz__raum101", "raum101"], who=GLOBAL_ADMIN)
+    grub_reader.get_configs_by_ids.assert_called_once()
+
+
+@pytest.mark.parametrize("config_id", ["../../etc/ssl/foo", "abc__a/b", "abc__a.b"])
+def test_config_ids_are_plain_names(grub_reader, config_id):
+    with pytest.raises(HTTPException) as error:
+        linbo.get_configs(id=[config_id], who=GLOBAL_ADMIN)
+    assert error.value.status_code == 400
+    grub_reader.get_configs_by_ids.assert_not_called()
+
+
+@pytest.mark.parametrize("school", [None, ""])
+def test_a_school_administrator_without_school_lists_no_group(manager_class, school):
+    nobody = AuthenticatedUser(dn="", user="x", role="schooladministrator", school=school)
+    with pytest.raises(HTTPException) as error:
+        linbo.get_linbo_groups(who=nobody)
+    assert error.value.status_code == 403
+    manager_class.assert_not_called()

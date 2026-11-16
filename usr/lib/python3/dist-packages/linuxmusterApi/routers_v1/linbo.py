@@ -5,6 +5,7 @@ All business logic lives in linuxmusterTools.linbo modules.
 This router only handles HTTP concerns (auth, validation, responses).
 """
 
+import re
 import os.path
 import subprocess
 from datetime import datetime, timezone
@@ -46,6 +47,9 @@ from linuxmusterTools.common.checks import NameChecker
 
 name_checker = NameChecker()
 
+# Group ids are file names in the GRUB directory: no path, no dots
+GRUB_CONFIG_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{1,100}')
+
 router = APIRouter(
     prefix="/linbo",
     tags=["LINBO"],
@@ -60,7 +64,11 @@ def _config_manager(who: AuthenticatedUser) -> LinboConfigManager:
     groups of their own school.
     """
 
-    return LinboConfigManager(school=None if who.school == 'global' else who.school)
+    if who.school == 'global':
+        return LinboConfigManager(school=None)
+    if not who.school:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return LinboConfigManager(school=who.school)
 
 # --- Paths ---
 
@@ -678,6 +686,10 @@ def get_configs(
     """
     ## Get GRUB configuration files for a list of group IDs.
 
+    A school-administrator can only read the configs of the groups of their own
+    school (`<school>__<group>`, the plain group for default-school); any other
+    id is refused with 403.
+
     ### Access
     - global-administrators
     - school-administrators
@@ -688,6 +700,10 @@ def get_configs(
 
 
     ids = _parse_list_query(id, "id", 100)
+    for config_id in ids:
+        if not GRUB_CONFIG_ID_PATTERN.fullmatch(config_id):
+            raise HTTPException(status_code=400, detail=f"Invalid GRUB config id: {config_id}")
+        check_linbo_group_access(config_id, who)
 
     grub_reader = LinboGrubReader()
     results = grub_reader.get_configs_by_ids(ids)
@@ -1281,9 +1297,9 @@ async def upload_image_file(
     """
     ## Upload an image or extra_file with Content-Range support.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1353,9 +1369,9 @@ def finalize_upload_endpoint(
     """
     ## Move uploaded files from staging to final images directory.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     If the target directory already contains image files, they are backed up
     to a timestamped subdirectory before being replaced.
@@ -1384,9 +1400,9 @@ def cancel_upload_endpoint(
     """
     ## Clean up staged upload files on cancel or failure.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1472,9 +1488,9 @@ def delete_image(
     An image whose `.info` is missing or incomplete, listed with an `error`,
     can be deleted too.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1506,9 +1522,9 @@ def delete_image_diff(
     """
     ## Delete only the differential image of a LINBO image.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1543,9 +1559,9 @@ def delete_image_backup(
     including files added by hand. Clients must warn the admin of this before
     calling it.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1574,9 +1590,9 @@ def restore_image_backup(
     """
     ## Restore a backup over the base image.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     The base image is moved to a new backup first, so the operation is
     reversible.
@@ -1608,9 +1624,9 @@ def rename_image(
     """
     ## Rename a LINBO image with its backups, differential image and sidecars.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1639,9 +1655,9 @@ def duplicate_image(
     """
     ## Copy a LINBO image under a new name, without its backups.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     ### Access
     - global-administrators
@@ -1677,9 +1693,9 @@ def save_image_extras(
     """
     ## Write the `info`, `desc`, `vdi`, `reg`, `postsync` and `prestart` sidecars.
 
-    A school-administrator addresses the groups of their own school only: the
-    id carries it (`<school>__<group>`, the plain group for default-school).
-    A group of another school is refused with 403.
+    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
+    server, so a school-administrator changes here what every school uses.
+    Per-school LINBO files are a later step.
 
     A field left out of the body deletes that sidecar, which is why `info` is
     required — an image without it cannot be read back. `timestamp` and `diff`

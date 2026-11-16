@@ -268,7 +268,7 @@ def test_configs_without_any_match_returns_an_empty_list(monkeypatch):
     reader.get_configs_by_ids.return_value = []
     monkeypatch.setattr(linbo, "LinboGrubReader", lambda: reader)
 
-    assert linbo.get_configs(["unknown"], None) == {"configs": []}
+    assert linbo.get_configs(["unknown"], SimpleNamespace(school="global")) == {"configs": []}
 
 
 def test_scan_school_admin_cannot_target_another_school(linbo_backends):
