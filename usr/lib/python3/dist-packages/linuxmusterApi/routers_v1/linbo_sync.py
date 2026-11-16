@@ -6,7 +6,7 @@ command, listing tmux sessions and probing ports stay in
 linuxmusterTools.linbo (LinboRemote, list_running_sessions, classify_host).
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import PlainTextResponse
 
 from linuxmusterTools.devices import Devices
@@ -14,6 +14,8 @@ from linuxmusterTools.linbo import (
     LinboBootLogs,
     LinboRemote,
     LinboRemoteParameterError,
+    LinboRunNotFoundError,
+    LinboRunReader,
     delete_onboot_command,
     get_onboot_command,
     list_onboot_commands,
@@ -21,6 +23,7 @@ from linuxmusterTools.linbo import (
 )
 from linuxmusterTools.linbo.group_ids import LINBO_GROUP_SEPARATOR, split_linbo_group_id
 from linuxmusterTools.linbo.host_status import classify_host
+from linuxmusterTools.linbo.runs import school_hostnames
 from security import AuthenticatedUser, RoleChecker
 from utils.checks import require_school
 from .body_schemas import LinboRemoteRunBody
@@ -89,6 +92,7 @@ def run_linbo_remote(
         bypass=body.bypass,
         onboot=body.onboot,
         school=None if active_school == "default-school" else active_school,
+        run_user=who.user,
     )
 
     try:
@@ -125,6 +129,112 @@ def get_running_sessions(
         for device in Devices(school=who.school).devices
     }
     return {"sessions": [s for s in sessions if s['hostname'] in known_hostnames]}
+
+
+RUN_ID_PATH = Path(pattern=r"^[A-Za-z0-9_.:+-]{1,100}$", description="Run id, as listed by /runs")
+HOSTNAME_PATH = Path(pattern=r"^[A-Za-z0-9_.-]{1,63}$", description="Host name as it appears in the run")
+
+
+def _run_hostnames(who: AuthenticatedUser):
+    """
+    The host names whose runs the user may see: all of them for a
+    global-administrator (None), the hosts of their own school otherwise.
+    """
+
+    if who.school == 'global':
+        return None
+    return school_hostnames(who.school)
+
+
+@router.get("/runs", name="List the finished and running linbo-remote runs")
+def get_runs(
+    limit: int = Query(50, ge=1, le=500, description="Number of runs, newest first"),
+    who: AuthenticatedUser = Depends(RoleChecker("GS")),
+):
+    """
+    ## List the recent linbo-remote runs, newest first.
+
+    A run is one `linbo-remote -c` invocation with its start and end time, the
+    user who started it, the commands, and the outcome of every host: `ok`,
+    `failed` (the exit status of its session is not 0) or `running`. For a
+    backgrounded `start`, `reboot`, `halt` or `poweroff` an exit status of 0
+    only means that the command was dispatched. Runs of onboot commands are not
+    recorded.
+
+    A global-administrator sees every run. A school-administrator only sees the
+    hosts of their own school, and runs without any of them are left out.
+
+    ### Access
+    - global-administrators
+    - school-administrators
+
+    \f
+    :param limit: Maximum number of runs
+    """
+
+
+    return {"runs": LinboRunReader().list_runs(hostnames=_run_hostnames(who), limit=limit)}
+
+
+@router.get("/runs/{run_id}", name="Read one linbo-remote run")
+def get_run(
+    run_id: str = RUN_ID_PATH,
+    who: AuthenticatedUser = Depends(RoleChecker("GS")),
+):
+    """
+    ## Read one linbo-remote run with the outcome of each of its hosts.
+
+    A school-administrator only sees the hosts of their own school; a run
+    without any of them is answered with 404.
+
+    ### Access
+    - global-administrators
+    - school-administrators
+
+    \f
+    :param run_id: Run id, as listed by /runs
+    """
+
+
+    try:
+        return LinboRunReader().get_run(run_id, hostnames=_run_hostnames(who))
+    except LinboRunNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.get(
+    "/runs/{run_id}/hosts/{hostname}/log",
+    name="Read a host's log of one linbo-remote run",
+    response_class=PlainTextResponse,
+)
+def get_run_host_log(
+    run_id: str = RUN_ID_PATH,
+    hostname: str = HOSTNAME_PATH,
+    who: AuthenticatedUser = Depends(RoleChecker("GS")),
+):
+    """
+    ## Read the log one host wrote during one linbo-remote run.
+
+    Unlike the session log, this stays available after later runs on the same
+    host, until the log is pruned (90 days). A school-administrator can only
+    read logs of hosts of their own school.
+
+    ### Access
+    - global-administrators
+    - school-administrators
+
+    \f
+    :param run_id: Run id, as listed by /runs
+    :param hostname: Host name, as it appears in the run
+    """
+
+
+    try:
+        return LinboRunReader().read_run_log(run_id, hostname, hostnames=_run_hostnames(who))
+    except LinboRunNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.get(
