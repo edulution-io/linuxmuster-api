@@ -6,6 +6,8 @@ command, listing tmux sessions and probing ports stay in
 linuxmusterTools.linbo (LinboRemote, list_running_sessions, classify_host).
 """
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import PlainTextResponse
 
@@ -131,8 +133,10 @@ def get_running_sessions(
     return {"sessions": [s for s in sessions if s['hostname'] in known_hostnames]}
 
 
-RUN_ID_PATH = Path(pattern=r"^[A-Za-z0-9_.:+-]{1,100}$", description="Run id, as listed by /runs")
-HOSTNAME_PATH = Path(pattern=r"^[A-Za-z0-9_.-]{1,63}$", description="Host name as it appears in the run")
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_.:+-]{1,100}")
+HOSTNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,63}")
+RUN_ID_PATH = Path(pattern=f"^{RUN_ID_PATTERN.pattern}$", description="Run id, as listed by /runs")
+HOSTNAME_PATH = Path(pattern=f"^{HOSTNAME_PATTERN.pattern}$", description="Host name as it appears in the run")
 
 
 def _run_hostnames(who: AuthenticatedUser):
@@ -143,6 +147,8 @@ def _run_hostnames(who: AuthenticatedUser):
 
     if who.school == 'global':
         return None
+    if not who.school:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return school_hostnames(who.school)
 
 
