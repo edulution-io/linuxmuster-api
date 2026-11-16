@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from routers_v1 import linbo
 from routers_v1.body_schemas import LinboVdiConfigBody, StartConfRawBody
 from security import AuthenticatedUser
+from linuxmusterTools.linbo.grub import LinboGrubReader
 from utils.checks import check_linbo_group_access
 
 GLOBAL_ADMIN = AuthenticatedUser(dn="", user="global-admin", role="globaladministrator", school="global")
@@ -178,3 +179,38 @@ def test_a_school_administrator_without_school_lists_no_group(manager_class, sch
         linbo.get_linbo_groups(who=nobody)
     assert error.value.status_code == 403
     manager_class.assert_not_called()
+
+
+# ── routes that look up a group of devices.csv by its id ────────────────────
+
+
+def test_host_status_of_a_school_host_reads_the_start_conf_of_its_group_id(monkeypatch):
+    devices = Mock()
+    devices.get_host.return_value = {
+        "hostname": "pc100", "group": "win11", "room": "R1", "mac": "00:11:22:33:44:55",
+        "ip": "10.0.0.100", "sophomorixRole": "classroom-studentcomputer", "pxeEnabled": True,
+    }
+    workstations = Mock(return_value={"abc__win11": {"os": [{"baseimage": "w.qcow2", "partition": 2}]}})
+    config = Mock(return_value=[{"BaseImage": "w.qcow2", "Name": "Windows 11"}])
+    monkeypatch.setattr(linbo, "Devices", lambda school: devices)
+    monkeypatch.setattr(linbo, "list_workstations", workstations)
+    monkeypatch.setattr(linbo, "read_config", config)
+    monkeypatch.setattr(linbo, "last_sync", Mock(return_value=False))
+    monkeypatch.setattr(linbo, "classify_host", Mock(return_value="Off"))
+
+    result = linbo.host_status(hostname="pc100", school="abc", probe=False, who=ABC_ADMIN)
+
+    config.assert_called_once_with("abc__win11")
+    assert [image["image"] for image in result["images"]] == ["w.qcow2"]
+
+
+def test_grub_configs_of_a_school_are_the_ones_named_by_its_group_ids(tmp_path, monkeypatch):
+    for name in ("room1", "abc__room1", "xyz__room1"):
+        (tmp_path / f"{name}.cfg").write_text(f"# {name}\n")
+    monkeypatch.setattr(linbo, "Devices", lambda school: Mock(groups=["room1"]))
+    monkeypatch.setattr(linbo, "check_valid_school_or_404", lambda school: None)
+    monkeypatch.setattr(linbo, "LinboGrubReader", lambda: LinboGrubReader(grub_dir=tmp_path))
+
+    result = linbo.get_all_grub_configs(school="abc", who=ABC_ADMIN)
+
+    assert [config["id"] for config in result["configs"]] == ["abc__room1"]

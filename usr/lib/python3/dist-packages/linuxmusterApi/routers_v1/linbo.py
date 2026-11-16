@@ -41,6 +41,7 @@ from linuxmusterTools.ldapconnector.checks import valid_schools
 from linuxmusterTools.devices import Devices
 
 from linuxmusterTools.linbo import *
+from linuxmusterTools.linbo.group_ids import try_get_linbo_group_id
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.common.checks import NameChecker
 
@@ -782,9 +783,12 @@ def get_all_grub_configs(
     check_valid_school_or_404(school)
 
     try:
-        school_groups = Devices(school=school).groups
+        device_groups = Devices(school=school).groups
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"School '{school}' not found")
+
+    # the GRUB configs are named by group id (<school>__<group> outside default-school)
+    school_groups = {try_get_linbo_group_id(school, group) for group in device_groups} - {None}
 
     grub_reader = LinboGrubReader()
     configs = grub_reader.get_all_grub_configs(school_groups=school_groups)
@@ -992,14 +996,17 @@ def host_status(
     logged_hostname = hostname if school == "default-school" else f"{school}-{hostname}"
 
     group = device["group"]
+    group_id = try_get_linbo_group_id(school, group)
     # Empty for a device whose group has no start.conf, or with pxeFlag not in
     # (1, 2): such a host has no image to sync.
-    os_entries = list_workstations(school=school, groups=[group]).get(group, {}).get("os", [])
+    os_entries = []
+    if group_id:
+        os_entries = list_workstations(school=school, groups=[group]).get(group_id, {}).get("os", [])
 
     # group_os() drops the OS display name, so read it back from start.conf.
     os_names = {
         section.get("BaseImage"): section.get("Name")
-        for section in (read_config(group) or [])
+        for section in (read_config(group_id) if group_id else None) or []
     }
 
     images = []

@@ -618,6 +618,7 @@ def test_host_status_last_sync_is_utc_aware(host_status_backends):
 def test_host_status_looks_up_the_log_under_the_school_prefixed_name(host_status_backends):
     _, workstations, config, sync, _ = host_status_backends
     workstations.return_value, config.return_value = _one_image_group()
+    workstations.return_value = {"lehrer__win11": workstations.return_value["win11"]}
 
     linbo.host_status(
         hostname="pc100",
