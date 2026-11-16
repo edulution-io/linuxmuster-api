@@ -9,7 +9,10 @@ import pytest
 from fastapi import HTTPException
 
 from routers_v1 import linbo
-from security import RoleChecker
+from security import AuthenticatedUser, RoleChecker
+
+
+GLOBAL_ADMIN = AuthenticatedUser(dn="", user="global-admin", role="globaladministrator", school="global")
 
 
 BACKUPS = [
@@ -70,7 +73,7 @@ def test_timestamps_are_taken_as_integers():
 def test_list_reports_the_backups(manager):
     manager.list_startconf_backups.return_value = BACKUPS
 
-    result = linbo.list_startconf_backups("win11", None)
+    result = linbo.list_startconf_backups("win11", GLOBAL_ADMIN)
 
     manager.list_startconf_backups.assert_called_once_with("win11")
     assert result == {"id": "win11", "backups": BACKUPS, "total": 2}
@@ -79,7 +82,7 @@ def test_list_reports_the_backups(manager):
 def test_list_on_a_group_without_backups(manager):
     manager.list_startconf_backups.return_value = []
 
-    assert linbo.list_startconf_backups("win11", None) == {
+    assert linbo.list_startconf_backups("win11", GLOBAL_ADMIN) == {
         "id": "win11",
         "backups": [],
         "total": 0,
@@ -90,7 +93,7 @@ def test_list_400s_on_an_invalid_group_id(manager):
     manager.list_startconf_backups.side_effect = ValueError("Invalid linbo_conf name")
 
     with pytest.raises(HTTPException) as e:
-        linbo.list_startconf_backups("../../etc", None)
+        linbo.list_startconf_backups("../../etc", GLOBAL_ADMIN)
     assert e.value.status_code == 400
 
 
@@ -98,7 +101,7 @@ def test_list_400s_on_an_invalid_group_id(manager):
 
 
 def test_restore_delegates_to_the_manager(manager):
-    result = linbo.restore_startconf_backup("win11", 1632669598, None)
+    result = linbo.restore_startconf_backup("win11", 1632669598, GLOBAL_ADMIN)
 
     manager.restore_startconf_backup.assert_called_once_with("win11", 1632669598)
     assert result == {"id": "win11", "timestamp": 1632669598, "status": "restored"}
@@ -108,7 +111,7 @@ def test_restore_404s_on_an_unknown_backup(manager):
     manager.restore_startconf_backup.side_effect = FileNotFoundError("No backup")
 
     with pytest.raises(HTTPException) as e:
-        linbo.restore_startconf_backup("win11", 1632669598, None)
+        linbo.restore_startconf_backup("win11", 1632669598, GLOBAL_ADMIN)
     assert e.value.status_code == 404
 
 
@@ -116,7 +119,7 @@ def test_restore_400s_on_an_invalid_group_id(manager):
     manager.restore_startconf_backup.side_effect = ValueError("Invalid linbo_conf name")
 
     with pytest.raises(HTTPException) as e:
-        linbo.restore_startconf_backup("../../etc", 1632669598, None)
+        linbo.restore_startconf_backup("../../etc", 1632669598, GLOBAL_ADMIN)
     assert e.value.status_code == 400
 
 
@@ -124,7 +127,7 @@ def test_restore_400s_on_an_invalid_group_id(manager):
 
 
 def test_delete_delegates_to_the_manager(manager):
-    result = linbo.delete_startconf_backup("win11", 1632669598, None)
+    result = linbo.delete_startconf_backup("win11", 1632669598, GLOBAL_ADMIN)
 
     manager.delete_startconf_backup.assert_called_once_with("win11", 1632669598)
     assert result == {"id": "win11", "timestamp": 1632669598, "status": "deleted"}
@@ -134,7 +137,7 @@ def test_delete_404s_on_an_unknown_backup(manager):
     manager.delete_startconf_backup.side_effect = FileNotFoundError("No backup")
 
     with pytest.raises(HTTPException) as e:
-        linbo.delete_startconf_backup("win11", 1632669598, None)
+        linbo.delete_startconf_backup("win11", 1632669598, GLOBAL_ADMIN)
     assert e.value.status_code == 404
 
 
@@ -142,5 +145,5 @@ def test_delete_400s_on_an_invalid_group_id(manager):
     manager.delete_startconf_backup.side_effect = ValueError("Invalid linbo_conf name")
 
     with pytest.raises(HTTPException) as e:
-        linbo.delete_startconf_backup("../../etc", 1632669598, None)
+        linbo.delete_startconf_backup("../../etc", 1632669598, GLOBAL_ADMIN)
     assert e.value.status_code == 400
