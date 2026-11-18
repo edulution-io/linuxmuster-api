@@ -71,8 +71,10 @@ jobs:
           export VERSION=$(grep -i ^Version *.changes | head -n1 | sed 's/^[Vv]ersion:[[:space:]]*//')
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
+      # Attach the built files when the release is created: a GitHub release is
+      # immutable once published, so a separate upload step afterwards fails
+      # with "Cannot upload assets to an immutable release".
       - name: Create Release
-        id: create_release
         uses: softprops/action-gh-release@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -81,18 +83,13 @@ jobs:
           draft: false
           prerelease: false
           body_path: ./current-changes
+          files: |
+            *.deb
+            *.changes
+            *.buildinfo
 
       - name: Delete current changes file
         run: rm ./current-changes
-
-      - name: Upload Release Assets
-        id: upload-release-assets
-        uses: dwenegar/upload-release-assets@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          release_id: ${{ steps.create_release.outputs.id }}
-          assets_path: .
 
   publish:
     needs: deb-package
