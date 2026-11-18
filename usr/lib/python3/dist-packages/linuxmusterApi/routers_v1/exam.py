@@ -63,14 +63,20 @@ def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserList
     - school-administrators
     - teachers (own data)
 
+    The collected files go to `transfer/collected/<target>` of the supervisor.
+    Without `target`, the directory is named `EXAM_<group_type>_<group_name>_<timestamp>`,
+    leaving out what was not sent. The response returns the `target` used:
+    a client which stops many users in several requests passes it back in
+    every following request, so all of them are collected in one directory.
+
     ### This endpoint uses Sophomorix.
 
     \f
     :param who: User requesting the data, read from API Token
     :type who: AuthenticatedUser
-    :param stopexam: StopExam object containing the list of users, the group type and group name
+    :param stopexam: StopExam object containing the list of users, the group type, group name and optional target
     :type userlist: StopExam
-    :return: Session details
+    :return: The name of the directory the files were collected in
     :rtype: dict
     """
 
@@ -79,10 +85,15 @@ def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserList
         # Nothing to do
         raise HTTPException(status_code=400, detail=f"Missing userlist of members to handle")
 
-    now = strftime("%Y-%m-%d_%Hh%Mm%S", localtime())
-    target = f'EXAM_{stopexam.group_type}_{stopexam.group_name}_{now}'
-    
-    # Escape chars in target directory
+    if stopexam.target:
+        target = stopexam.target
+    else:
+        now = strftime("%Y-%m-%d_%Hh%Mm%S", localtime())
+        # Leave out a missing group type or name, instead of writing "None" into the directory name.
+        parts = [part for part in (stopexam.group_type, stopexam.group_name) if part]
+        target = '_'.join(['EXAM', *parts, now])
+
+    # Escape chars in target directory, also for a target sent by the client
     target = re.sub(r'[^A-Za-z0-9_-]', '_', target)
 
     try:
@@ -97,6 +108,8 @@ def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserList
         lmn_getSophomorixValue(sophomorixCommand, 'COMMENT_EN')
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error stoping exam mode: {str(e)}")
+
+    return {'target': target}
 
 @router.get("/users", name="List all users in exammode")
 def users_exam_mode(who: AuthenticatedUser = Depends(RoleChecker("GST"))):
