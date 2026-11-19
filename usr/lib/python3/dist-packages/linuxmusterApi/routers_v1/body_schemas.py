@@ -160,12 +160,15 @@ class StopExam(BaseModel):
     """
     users is a list of samaccountname from whom stop the exam. The attribute group_type (like "schoolclass") and
     group_name (like "8a") are used to build the path name of the directory which will contain the collected files.
+    target is the name of that directory, as returned by a previous stop request: set it to collect the users of
+    several requests in one directory.
     """
 
 
     users: list | None = None
     group_type: str | None = None
     group_name: str | None = None
+    target: str | None = None
 
 class PrintPasswordsSchoolclassesParameter(BaseModel):
     """
@@ -455,3 +458,12 @@ class DomainPasswordPolicy(BaseModel):
     min_pwd_age: int | None = None
     max_pwd_age: int | None = None
     complexity: bool | None = None
+
+
+class ConnectionRequest(BaseModel):
+    """
+    Request body for a VDI connection (POST /vdi/connection).
+    """
+
+    group: str
+    user: str

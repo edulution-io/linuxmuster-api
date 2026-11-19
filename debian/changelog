@@ -1,3 +1,29 @@
+linuxmuster-api7 (1:7.4.17~edu) lmn74; urgency=high
+
+  * Merge upstream 7.4.17 (security release). Upstream notes:
+  * [security] Teachers could add users to any AD group through the
+    management groups routes: only management groups are accepted.
+  * [security] Root command execution through the target directory of
+    POST /exammode/stop.
+  * [security] /query is limited to the own school, except for global
+    administrators, and never returns first passwords.
+  * [security] Parents and staff have the same rank as teachers. A user
+    can't act on another user of the same rank or of another school.
+  * [security] First passwords of other users are hidden from teachers
+    (except students) and from school administrators (administrators).
+  * [security] School administrators only see the administrators and
+    bind users of their own school.
+  * [security] [sessions] The members of a new session and the owner of
+    a session are checked.
+  * [vdi] VDI groups return a display name and the OS family, the
+    connection returns the VM assigned by the broker.
+  * [samba] smbstatus is read through linuxmuster-tools.
+  * edulution fork: the dependency on linuxmuster-tools7 is clamped to
+    (>= 1:7.4.21~) instead of (>= 7.4.21), the epoch idiom that keeps the
+    fork from being mixed with the upstream package.
+
+ -- Lukas Lukic-Spitznagel <lukas.spitznagel@netzint.de>  Tue, 18 Nov 2026 14:00:00 +0100
+
 linuxmuster-api7 (1:7.4.16~edu) lmn74; urgency=medium
 
   * edulution fork. The package keeps its upstream name, so the epoch 1: is
