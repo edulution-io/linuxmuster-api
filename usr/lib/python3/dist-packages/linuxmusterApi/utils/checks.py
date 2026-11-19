@@ -203,7 +203,7 @@ def check_management_group_or_404(group, school):
     if found != cn:
         raise HTTPException(status_code=404, detail=f"Management group {group} not found.")
 
-def get_dn_or_404(route, name, kind):
+def get_dn_or_404(route, name, kind, school=None):
     """
     Resolve the distinguishedName of an object, or raise an error naming it.
 
@@ -219,12 +219,15 @@ def get_dn_or_404(route, name, kind):
     :param route: Ldap router path of the object type, e.g. "users" or "units"
     :param name: cn of the object to resolve
     :param kind: Human readable object type, used in the error detail
+    :param school: School to search in, for routes scoped to a school like
+    "units". Without it, the router searches in default-school.
     :return: The distinguishedName of the object
     :raises HTTPException: 400 for an exam account, 404 for an unknown name
     """
 
 
-    dn = lr.getval(f'/{route}/{name}', 'distinguishedName')
+    search = {'school': school} if school else {}
+    dn = lr.getval(f'/{route}/{name}', 'distinguishedName', **search)
 
     if not dn:
         if route == 'users' and lr.getval(f'/users/exam/{name}', 'distinguishedName'):
