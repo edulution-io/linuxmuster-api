@@ -10,7 +10,10 @@ from fastapi import HTTPException
 
 from routers_v1 import linbo
 from routers_v1.body_schemas import LinboVdiConfigBody
-from security import RoleChecker
+from security import AuthenticatedUser, RoleChecker
+
+
+GLOBAL_ADMIN = AuthenticatedUser(dn="", user="global-admin", role="globaladministrator", school="global")
 
 
 CONFIG = {
@@ -66,7 +69,7 @@ def test_vdi_routes_are_open_to_admins():
 def test_get_returns_the_parsed_config(manager):
     manager.read_vdi_config.return_value = CONFIG
 
-    assert linbo.get_startconf_vdi("win11", None) == CONFIG
+    assert linbo.get_startconf_vdi("win11", GLOBAL_ADMIN) == CONFIG
     manager.read_vdi_config.assert_called_once_with("win11")
 
 
@@ -74,7 +77,7 @@ def test_get_404s_when_the_group_has_no_vdi_config(manager):
     manager.read_vdi_config.side_effect = FileNotFoundError("not found")
 
     with pytest.raises(HTTPException) as e:
-        linbo.get_startconf_vdi("win11", None)
+        linbo.get_startconf_vdi("win11", GLOBAL_ADMIN)
     assert e.value.status_code == 404
 
 
@@ -82,7 +85,7 @@ def test_get_400s_on_an_invalid_group_id(manager):
     manager.read_vdi_config.side_effect = ValueError("Invalid linbo_conf name")
 
     with pytest.raises(HTTPException) as e:
-        linbo.get_startconf_vdi("../../etc/passwd", None)
+        linbo.get_startconf_vdi("../../etc/passwd", GLOBAL_ADMIN)
     assert e.value.status_code == 400
 
 
@@ -90,7 +93,7 @@ def test_get_400s_on_an_invalid_group_id(manager):
 
 
 def test_put_writes_the_config(manager):
-    result = linbo.write_startconf_vdi("win11", LinboVdiConfigBody(**CONFIG), None)
+    result = linbo.write_startconf_vdi("win11", LinboVdiConfigBody(**CONFIG), GLOBAL_ADMIN)
 
     manager.write_vdi_config.assert_called_once_with("win11", CONFIG)
     assert result == {"id": "win11", "status": "ok"}
@@ -103,7 +106,7 @@ def test_put_does_not_invent_null_fields(manager):
     thirteen nulls for a request that only flips `activated`.
     """
 
-    linbo.write_startconf_vdi("win11", LinboVdiConfigBody(activated=False), None)
+    linbo.write_startconf_vdi("win11", LinboVdiConfigBody(activated=False), GLOBAL_ADMIN)
 
     _, written = manager.write_vdi_config.call_args[0]
     assert written == {"activated": False}
@@ -117,7 +120,7 @@ def test_put_keeps_unknown_fields(manager):
 
     body = LinboVdiConfigBody(**CONFIG, some_future_field="keep me")
 
-    linbo.write_startconf_vdi("win11", body, None)
+    linbo.write_startconf_vdi("win11", body, GLOBAL_ADMIN)
 
     _, written = manager.write_vdi_config.call_args[0]
     assert written["some_future_field"] == "keep me"
@@ -127,7 +130,7 @@ def test_put_400s_on_an_invalid_group_id(manager):
     manager.write_vdi_config.side_effect = ValueError("Invalid linbo_conf name")
 
     with pytest.raises(HTTPException) as e:
-        linbo.write_startconf_vdi("../../etc/passwd", LinboVdiConfigBody(**CONFIG), None)
+        linbo.write_startconf_vdi("../../etc/passwd", LinboVdiConfigBody(**CONFIG), GLOBAL_ADMIN)
     assert e.value.status_code == 400
 
 
@@ -135,7 +138,7 @@ def test_put_400s_on_an_invalid_group_id(manager):
 
 
 def test_delete_removes_the_config(manager):
-    result = linbo.delete_startconf_vdi("win11", None)
+    result = linbo.delete_startconf_vdi("win11", GLOBAL_ADMIN)
 
     manager.delete_vdi_config.assert_called_once_with("win11")
     assert result == {"id": "win11", "status": "deleted"}
@@ -145,7 +148,7 @@ def test_delete_404s_when_the_group_has_no_vdi_config(manager):
     manager.delete_vdi_config.side_effect = FileNotFoundError("not found")
 
     with pytest.raises(HTTPException) as e:
-        linbo.delete_startconf_vdi("win11", None)
+        linbo.delete_startconf_vdi("win11", GLOBAL_ADMIN)
     assert e.value.status_code == 404
 
 
@@ -153,5 +156,5 @@ def test_delete_400s_on_an_invalid_group_id(manager):
     manager.delete_vdi_config.side_effect = ValueError("Invalid linbo_conf name")
 
     with pytest.raises(HTTPException) as e:
-        linbo.delete_startconf_vdi("../etc/passwd", None)
+        linbo.delete_startconf_vdi("../etc/passwd", GLOBAL_ADMIN)
     assert e.value.status_code == 400
