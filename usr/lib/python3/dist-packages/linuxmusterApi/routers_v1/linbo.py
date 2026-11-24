@@ -41,9 +41,22 @@ from linuxmusterTools.ldapconnector.checks import valid_schools
 from linuxmusterTools.devices import Devices
 
 from linuxmusterTools.linbo import *
-from linuxmusterTools.linbo.group_ids import try_get_linbo_group_id
+from linuxmusterTools.linbo.group_ids import try_get_linbo_group_id as _try_get_linbo_group_id
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.common.checks import NameChecker
+
+
+def try_get_linbo_group_id(school, group):
+    """
+    The group id of a devices.csv group, None for a group without a usable id.
+    An empty or whitespace-only group has none either: the tools helper would
+    answer 'abc__' for it, while generate_dnsmasq_proxy leaves such a host out.
+    """
+
+    group = "" if group is None else str(group)
+    if not group.strip():
+        return None
+    return _try_get_linbo_group_id(school, group)
 
 
 name_checker = NameChecker()
@@ -247,7 +260,7 @@ def get_changes(
     # mac -> linboGroupId, the same id as linboGroupId of /hosts/query; the
     # tracker has just reloaded the devices of the school.
     changes["hostGroupIds"] = {
-        host["mac"]: try_get_linbo_group_id(school, str(host.get("group", "")))
+        host["mac"]: try_get_linbo_group_id(school, host.get("group"))
         for host in tracker.devices_mgr.devices
         if host.get("mac")
     }
@@ -286,7 +299,7 @@ def query_hosts(
     # group stays the plain devices.csv value; linboGroupId is the id naming
     # the start.conf and GRUB config of the host, null for a group without one.
     hosts = [
-        {**host, "linboGroupId": try_get_linbo_group_id(school, str(host.get("group", "")))}
+        {**host, "linboGroupId": try_get_linbo_group_id(school, host.get("group"))}
         for host in Devices(school=school).get_hosts_by_macs(body.macs)
     ]
 

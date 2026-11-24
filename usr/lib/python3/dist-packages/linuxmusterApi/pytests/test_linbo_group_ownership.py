@@ -334,6 +334,16 @@ def test_host_query_gives_a_group_without_an_id_none(monkeypatch):
     assert hosts[0]["linboGroupId"] is None
 
 
+@pytest.mark.parametrize("group", ["", "  ", None])
+def test_host_query_gives_an_empty_group_no_id(monkeypatch, group):
+    for school in ("abc", "default-school"):
+        hosts = _query(monkeypatch, school, [{"mac": "m", "group": group}])
+        assert hosts[0]["linboGroupId"] is None
+
+    hosts = _query(monkeypatch, "abc", [{"mac": "m"}])
+    assert hosts[0]["linboGroupId"] is None
+
+
 def test_host_query_does_not_change_the_cached_records(monkeypatch):
     record = {"mac": "m", "group": "raum101"}
     _query(monkeypatch, "abc", [record])
@@ -357,6 +367,13 @@ def test_changes_map_the_hosts_to_their_group_ids(monkeypatch):
     ])
 
     assert result["hostGroupIds"] == {"m1": "abc__raum101", "m2": None}
+
+
+@pytest.mark.parametrize("group", ["", "  ", None])
+def test_changes_give_an_empty_group_no_id(monkeypatch, group):
+    result = _changes(monkeypatch, "abc", [{"mac": "m1", "group": group}, {"mac": "m2"}])
+
+    assert result["hostGroupIds"] == {"m1": None, "m2": None}
 
 
 def test_changes_use_the_plain_group_for_default_school(monkeypatch):
