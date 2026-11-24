@@ -10,8 +10,8 @@ from unittest.mock import Mock
 import pytest
 from fastapi import HTTPException
 
-from routers_v1 import linbo
-from routers_v1.body_schemas import LinboVdiConfigBody, StartConfRawBody
+from routers_v1 import linbo, linbo_sync
+from routers_v1.body_schemas import LinboRemoteRunBody, LinboVdiConfigBody, StartConfRawBody
 from security import AuthenticatedUser
 from linuxmusterTools.linbo.grub import LinboGrubReader
 from utils.checks import check_linbo_group_access
@@ -214,3 +214,84 @@ def test_grub_configs_of_a_school_are_the_ones_named_by_its_group_ids(tmp_path, 
     result = linbo.get_all_grub_configs(school="abc", who=ABC_ADMIN)
 
     assert [config["id"] for config in result["configs"]] == ["abc__room1"]
+
+
+# ── /health ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def health(tmp_path, monkeypatch):
+    """The health route over a start.conf and a GRUB directory holding three schools."""
+    import linuxmusterTools.linbo.config as config_module
+
+    grub = tmp_path / "grub"
+    grub.mkdir()
+    for name in ("room1", "abc__room1", "abc__room2", "xyz__room1"):
+        (tmp_path / f"start.conf.{name}").write_text("[LINBO]\n")
+        (grub / f"{name}.cfg").write_text("")
+    monkeypatch.setattr(config_module, "LINBO_PATH", str(tmp_path))
+    monkeypatch.setattr(linbo, "LinboGrubReader", lambda: LinboGrubReader(grub_dir=grub))
+    monkeypatch.setattr(linbo, "check_valid_school_or_404", lambda school: None)
+    monkeypatch.setattr(linbo, "Devices", lambda school: Mock(path=str(tmp_path)))
+    monkeypatch.setattr("utils.checks.lr.getval", lambda *a, **k: ["default-school", "abc", "xyz"])
+
+
+@pytest.mark.parametrize("who, school, expected", [
+    (GLOBAL_ADMIN, "abc", 2),
+    (GLOBAL_ADMIN, "xyz", 1),
+    (GLOBAL_ADMIN, "default-school", 1),
+    (ABC_ADMIN, "abc", 2),
+    (ABC_ADMIN, "", 2),
+])
+def test_health_counts_the_configs_of_the_school(health, who, school, expected):
+    result = linbo.linbo_health(school=school, who=who)
+    assert result["startConfs"] == expected
+    assert result["grubConfigs"] == expected
+
+
+def test_health_refuses_another_school_to_a_school_administrator(health):
+    with pytest.raises(HTTPException) as error:
+        linbo.linbo_health(school="xyz", who=ABC_ADMIN)
+    assert error.value.status_code == 403
+
+
+# ── POST /linbo/sync/run with a group id ─────────────────────────────────────
+
+
+@pytest.fixture
+def remote(monkeypatch):
+    seen = {}
+
+    def fake_linbo_remote(**kwargs):
+        seen.update(kwargs)
+        instance = Mock()
+        instance.run.return_value = {"status": 0}
+        return instance
+
+    monkeypatch.setattr(linbo_sync, "LinboRemote", fake_linbo_remote)
+    monkeypatch.setattr("utils.checks.lr.getval", lambda *a, **k: ["default-school", "abc", "xyz"])
+    return seen
+
+
+@pytest.mark.parametrize("who, school, group, expected", [
+    (ABC_ADMIN, "abc", "abc__raum", "raum"),
+    (ABC_ADMIN, "abc", "raum", "raum"),
+    (GLOBAL_ADMIN, "abc", "abc__raum", "raum"),
+    (DEFAULT_ADMIN, "default-school", "raum", "raum"),
+])
+def test_run_accepts_the_id_of_a_group_of_the_targeted_school(remote, who, school, group, expected):
+    linbo_sync.run_linbo_remote(body=LinboRemoteRunBody(cmd="reboot", group=group), school=school, who=who)
+    assert remote["group"] == expected
+    assert remote["school"] == (None if school == "default-school" else school)
+
+
+@pytest.mark.parametrize("who, school, group, status", [
+    (ABC_ADMIN, "abc", "xyz__raum", 403),
+    (DEFAULT_ADMIN, "default-school", "abc__raum", 403),
+    (GLOBAL_ADMIN, "abc", "xyz__raum", 400),
+])
+def test_run_refuses_the_id_of_a_group_of_another_school(remote, who, school, group, status):
+    with pytest.raises(HTTPException) as error:
+        linbo_sync.run_linbo_remote(body=LinboRemoteRunBody(cmd="reboot", group=group), school=school, who=who)
+    assert error.value.status_code == status
+    assert remote == {}

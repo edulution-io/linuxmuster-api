@@ -19,6 +19,7 @@ from linuxmusterTools.linbo import (
     list_onboot_commands,
     list_running_sessions,
 )
+from linuxmusterTools.linbo.group_ids import LINBO_GROUP_SEPARATOR, split_linbo_group_id
 from linuxmusterTools.linbo.host_status import classify_host
 from security import AuthenticatedUser, RoleChecker
 from utils.checks import require_school
@@ -48,6 +49,10 @@ def run_linbo_remote(
     A school-administrator can only target their own school; a
     global-administrator must specify one explicitly.
 
+    The group is the plain group of the school or a group id as listed by
+    `/linbo/linbo-groups` (`<school>__<group>`). The school of an id must be
+    the targeted school.
+
     ### Access
     - global-administrators
     - school-administrators
@@ -63,9 +68,18 @@ def run_linbo_remote(
     if len(body.clients) > MAX_CLIENTS_PER_RUN:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_CLIENTS_PER_RUN} clients per request")
 
+    group = body.group
+    if group and LINBO_GROUP_SEPARATOR in group:
+        group_school, group = split_linbo_group_id(group)
+        if group_school != active_school:
+            # an id names its school: it must not steer a run to another one
+            if who.school == 'global':
+                raise HTTPException(status_code=400, detail="The group does not belong to the targeted school.")
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     remote = LinboRemote(
         cmd=body.cmd,
-        group=body.group,
+        group=group,
         room=body.room,
         clients=body.clients,
         wait=body.wait,

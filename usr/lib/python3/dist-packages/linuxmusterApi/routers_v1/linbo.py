@@ -178,6 +178,7 @@ def restart_services(
 
 
 @router.get("/health", name="LINBO subsystem health check")
+@require_school
 def linbo_health(
     school: str = "default-school",
     who: AuthenticatedUser = Depends(RoleChecker("GS")),
@@ -185,9 +186,11 @@ def linbo_health(
     """
     ## LINBO subsystem health check.
 
+    The start.conf and GRUB config counts are those of the school.
+
     ### Access
     - global-administrators
-    - school-administrators
+    - school-administrators (scoped to their own school)
 
     \f
     :param school: School name (default: default-school)
@@ -197,15 +200,19 @@ def linbo_health(
 
     check_valid_school_or_404(school)
     csv_path_exists = os.path.isfile(Devices(school).path)
-    config_ids = _config_manager(who).group_ids
-    grub_reader = LinboGrubReader()
+    school_manager = LinboConfigManager(school=school)
+    config_ids = school_manager.group_ids
+    grub_ids = [
+        grub_id for grub_id in LinboGrubReader().list_grub_cfg_ids()
+        if school_manager.owns(grub_id)
+    ]
 
     return {
         "status": "ok" if csv_path_exists and LINBO_DIR.is_dir() else "degraded",
         "devicesCSV": csv_path_exists,
         "linboDir": LINBO_DIR.is_dir(),
         "startConfs": len(config_ids),
-        "grubConfigs": len(grub_reader.list_grub_cfg_ids()),
+        "grubConfigs": len(grub_ids),
     }
 
 

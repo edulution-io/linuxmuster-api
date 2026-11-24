@@ -360,6 +360,9 @@ class LinboRemoteRunBody(BaseModel):
     """
     Parameters to build and run a linbo-remote command via LinboRemote.
 
+    The group is the plain group of the targeted school, or an id as listed by
+    /linbo/linbo-groups (`<school>__<group>`) whose school is the targeted one.
+
     Exactly one of group, room or clients must be given — LinboRemote itself
     validates that (and everything else: unknown commands, nr out of range
     for the target's start.conf, etc.), surfaced as a 400 if it rejects them.
