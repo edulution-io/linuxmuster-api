@@ -341,6 +341,37 @@ def test_host_query_does_not_change_the_cached_records(monkeypatch):
     assert "linboGroupId" not in record
 
 
+def _changes(monkeypatch, school, devices):
+    tracker = Mock()
+    tracker.get_changes.return_value = {"nextCursor": "1", "allHostMacs": ["m"]}
+    tracker.devices_mgr.devices = devices
+    monkeypatch.setattr(linbo, "LinboChangeTracker", lambda school: tracker)
+    monkeypatch.setattr(linbo, "check_valid_school_or_404", lambda school: school)
+    return linbo.get_changes(since="0", school=school, who=SimpleNamespace(school=school))
+
+
+def test_changes_map_the_hosts_to_their_group_ids(monkeypatch):
+    result = _changes(monkeypatch, "abc", [
+        {"mac": "m1", "group": "raum101"},
+        {"mac": "m2", "group": "a__b"},
+    ])
+
+    assert result["hostGroupIds"] == {"m1": "abc__raum101", "m2": None}
+
+
+def test_changes_use_the_plain_group_for_default_school(monkeypatch):
+    result = _changes(monkeypatch, "default-school", [{"mac": "m1", "group": "raum101"}])
+
+    assert result["hostGroupIds"] == {"m1": "raum101"}
+
+
+def test_changes_keep_the_existing_fields(monkeypatch):
+    result = _changes(monkeypatch, "abc", [])
+
+    assert result["nextCursor"] == "1" and result["allHostMacs"] == ["m"]
+    assert result["hostGroupIds"] == {}
+
+
 def test_dnsmasq_export_hands_the_requested_school_to_the_exporter(monkeypatch):
     devices = Mock(devices=[{"mac": "m", "group": "raum101", "pxeEnabled": True}], csv_mtime=None)
     exporter = Mock()

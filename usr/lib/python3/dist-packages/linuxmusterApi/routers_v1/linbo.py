@@ -226,6 +226,10 @@ def get_changes(
     """
     ## Get changes since last sync (delta feed).
 
+    Besides the delta lists, `hostGroupIds` maps the MAC of every host of the
+    school to its `linboGroupId` (`<school>__<group>`, the plain group for
+    default-school; null if the group cannot get an id).
+
     ### Access
     - global-administrators
     - school-administrators (scoped to their own school)
@@ -238,7 +242,16 @@ def get_changes(
 
     check_valid_school_or_404(school)
     tracker = LinboChangeTracker(school=school)
-    return tracker.get_changes(since_cursor=since)
+    changes = tracker.get_changes(since_cursor=since)
+
+    # mac -> linboGroupId, the same id as linboGroupId of /hosts/query; the
+    # tracker has just reloaded the devices of the school.
+    changes["hostGroupIds"] = {
+        host["mac"]: try_get_linbo_group_id(school, str(host.get("group", "")))
+        for host in tracker.devices_mgr.devices
+        if host.get("mac")
+    }
+    return changes
 
 
 @router.post("/hosts/query", name="Query hosts by MAC address list")
