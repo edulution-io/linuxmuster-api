@@ -251,6 +251,10 @@ def query_hosts(
     """
     ## Get host records for a list of MAC addresses.
 
+    Every host carries `group` as in devices.csv and `linboGroupId`, the
+    school-qualified id of that group (`<school>__<group>`, the plain group
+    for default-school; null if the group cannot get an id).
+
     ### Access
     - global-administrators
     - school-administrators (scoped to their own school)
@@ -266,7 +270,12 @@ def query_hosts(
     if len(body.macs) > 500:
         raise HTTPException(status_code=400, detail="Maximum 500 MACs per request")
 
-    hosts = Devices(school=school).get_hosts_by_macs(body.macs)
+    # group stays the plain devices.csv value; linboGroupId is the id naming
+    # the start.conf and GRUB config of the host, null for a group without one.
+    hosts = [
+        {**host, "linboGroupId": try_get_linbo_group_id(school, str(host.get("group", "")))}
+        for host in Devices(school=school).get_hosts_by_macs(body.macs)
+    ]
 
     return {"hosts": hosts}
 
@@ -755,7 +764,7 @@ def dhcp_export_dnsmasq(
         raise HTTPException(status_code=404, detail="devices.csv empty")
 
     exporter = LinboDhcpExporter()
-    content = exporter.generate_dnsmasq_proxy(devices)
+    content = exporter.generate_dnsmasq_proxy(devices, school=school)
     etag = exporter.content_etag(content)
 
     if_none_match = request.headers.get("if-none-match")

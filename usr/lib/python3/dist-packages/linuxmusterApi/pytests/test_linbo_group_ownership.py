@@ -5,6 +5,7 @@ the groups of their own school only (the school is part of the group id,
 group.
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -295,3 +296,65 @@ def test_run_refuses_the_id_of_a_group_of_another_school(remote, who, school, gr
         linbo_sync.run_linbo_remote(body=LinboRemoteRunBody(cmd="reboot", group=group), school=school, who=who)
     assert error.value.status_code == status
     assert remote == {}
+
+
+# ── Group id in the host records and the dnsmasq export ────────────
+
+
+def _query(monkeypatch, school, hosts):
+    from routers_v1.body_schemas import LinboBatchMacs
+
+    devices = Mock()
+    devices.get_hosts_by_macs.return_value = hosts
+    monkeypatch.setattr(linbo, "Devices", lambda school: devices)
+    monkeypatch.setattr(linbo, "check_valid_school_or_404", lambda school: school)
+    return linbo.query_hosts(
+        LinboBatchMacs(macs=["00:11:22:33:44:55"]),
+        school=school,
+        who=SimpleNamespace(school=school),
+    )["hosts"]
+
+
+def test_host_query_adds_the_plain_group_id_for_default_school(monkeypatch):
+    hosts = _query(monkeypatch, "default-school", [{"mac": "m", "group": "raum101"}])
+
+    assert hosts == [{"mac": "m", "group": "raum101", "linboGroupId": "raum101"}]
+
+
+def test_host_query_adds_the_qualified_group_id_for_another_school(monkeypatch):
+    hosts = _query(monkeypatch, "abc", [{"mac": "m", "group": "raum101"}])
+
+    assert hosts[0]["group"] == "raum101"
+    assert hosts[0]["linboGroupId"] == "abc__raum101"
+
+
+def test_host_query_gives_a_group_without_an_id_none(monkeypatch):
+    hosts = _query(monkeypatch, "abc", [{"mac": "m", "group": "a__b"}])
+
+    assert hosts[0]["linboGroupId"] is None
+
+
+def test_host_query_does_not_change_the_cached_records(monkeypatch):
+    record = {"mac": "m", "group": "raum101"}
+    _query(monkeypatch, "abc", [record])
+
+    assert "linboGroupId" not in record
+
+
+def test_dnsmasq_export_hands_the_requested_school_to_the_exporter(monkeypatch):
+    devices = Mock(devices=[{"mac": "m", "group": "raum101", "pxeEnabled": True}], csv_mtime=None)
+    exporter = Mock()
+    exporter.generate_dnsmasq_proxy.return_value = "config"
+    exporter.content_etag.return_value = "tag"
+    monkeypatch.setattr(linbo, "Devices", lambda school: devices)
+    monkeypatch.setattr(linbo, "LinboDhcpExporter", lambda: exporter)
+    monkeypatch.setattr(linbo, "check_valid_school_or_404", lambda school: school)
+
+    response = linbo.dhcp_export_dnsmasq(
+        request=SimpleNamespace(headers={}),
+        school="abc",
+        who=SimpleNamespace(school="abc"),
+    )
+
+    assert response.body == b"config"
+    assert exporter.generate_dnsmasq_proxy.call_args.kwargs["school"] == "abc"
