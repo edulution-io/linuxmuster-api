@@ -40,6 +40,10 @@ router = APIRouter(
 # Mirrors the cap already used for /linbo/wol and /linbo/hosts/scan.
 MAX_CLIENTS_PER_RUN = 500
 
+# What LinboRemote accepts as run_user. The value is only an audit field, so a
+# name outside this set is left out of the record instead of failing the run.
+RUN_USER_PATTERN = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
+
 
 @router.post("/run", name="Build and run a linbo-remote command")
 @require_school
@@ -94,7 +98,7 @@ def run_linbo_remote(
         bypass=body.bypass,
         onboot=body.onboot,
         school=None if active_school == "default-school" else active_school,
-        run_user=who.user,
+        run_user=who.user if RUN_USER_PATTERN.fullmatch(who.user) else None,
     )
 
     try:

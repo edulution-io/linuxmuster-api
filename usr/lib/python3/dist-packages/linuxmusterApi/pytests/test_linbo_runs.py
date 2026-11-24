@@ -153,6 +153,28 @@ def test_run_passes_the_api_user_to_linbo_remote(monkeypatch):
     assert seen["run_user"] == "global-admin"
 
 
+@pytest.mark.parametrize("user", ["api key user", "x" * 65, "", "a\n"])
+def test_run_leaves_out_a_user_name_the_record_cannot_hold(monkeypatch, user):
+    monkeypatch.setattr("utils.checks.lr.getval", lambda *a, **k: ["default-school"])
+    seen = {}
+
+    def fake_linbo_remote(**kwargs):
+        seen.update(kwargs)
+        remote = Mock()
+        remote.run.return_value = {"status": 0, "msg": "ok"}
+        return remote
+
+    monkeypatch.setattr(linbo_sync, "LinboRemote", fake_linbo_remote)
+    odd = AuthenticatedUser(dn="", user=user, role="globaladministrator", school="global")
+
+    result = linbo_sync.run_linbo_remote(
+        body=LinboRemoteRunBody(cmd="reboot", group="win10"), school="default-school", who=odd,
+    )
+
+    assert result == {"status": 0, "msg": "ok"}
+    assert seen["run_user"] is None
+
+
 @pytest.mark.parametrize("school", [None, ""])
 def test_a_school_administrator_without_school_sees_no_runs(log_dir, school):
     nobody = AuthenticatedUser(dn="", user="x", role="schooladministrator", school=school)
