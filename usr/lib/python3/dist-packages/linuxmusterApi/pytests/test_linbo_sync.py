@@ -49,7 +49,7 @@ def test_run_delegates_to_linbo_remote(monkeypatch):
     monkeypatch.setattr(linbo_sync, "LinboRemote", lambda **kwargs: remote)
 
     body = LinboRemoteRunBody(cmd="reboot", group="win10")
-    who = Mock(school="global")
+    who = Mock(school="global", user="admin")
     result = linbo_sync.run_linbo_remote(body=body, school="default-school", who=who)
 
     assert result == {"status": 0, "msg": "ok"}
@@ -62,7 +62,7 @@ def test_run_raises_400_on_parameter_error(monkeypatch):
     monkeypatch.setattr(linbo_sync, "LinboRemote", lambda **kwargs: remote)
 
     body = LinboRemoteRunBody(cmd="reboot", group="win10")
-    who = Mock(school="global")
+    who = Mock(school="global", user="admin")
 
     with pytest.raises(HTTPException) as exc_info:
         linbo_sync.run_linbo_remote(body=body, school="default-school", who=who)
@@ -74,7 +74,7 @@ def test_run_raises_400_on_parameter_error(monkeypatch):
 def test_run_rejects_too_many_clients(monkeypatch):
     monkeypatch.setattr("utils.checks.lr.getval", lambda *a, **k: ["default-school"])
     body = LinboRemoteRunBody(cmd="reboot", clients=[f"10.0.0.{i}" for i in range(600)])
-    who = Mock(school="global")
+    who = Mock(school="global", user="admin")
 
     with pytest.raises(HTTPException) as exc_info:
         linbo_sync.run_linbo_remote(body=body, school="default-school", who=who)
@@ -93,7 +93,7 @@ def test_run_passes_none_school_for_default_school(monkeypatch):
     monkeypatch.setattr(linbo_sync, "LinboRemote", fake_linbo_remote)
 
     body = LinboRemoteRunBody(cmd="reboot", group="win10")
-    who = Mock(school="global")
+    who = Mock(school="global", user="admin")
     linbo_sync.run_linbo_remote(body=body, school="default-school", who=who)
 
     assert captured["school"] is None
@@ -110,7 +110,7 @@ def test_run_passes_school_when_not_default(monkeypatch):
     monkeypatch.setattr(linbo_sync, "LinboRemote", fake_linbo_remote)
 
     body = LinboRemoteRunBody(cmd="reboot", group="win10")
-    who = Mock(school="global")
+    who = Mock(school="global", user="admin")
     linbo_sync.run_linbo_remote(body=body, school="lehrer", who=who)
 
     assert captured["school"] == "lehrer"
@@ -128,7 +128,7 @@ def test_run_defaults_to_who_school_for_school_admin(monkeypatch):
     monkeypatch.setattr(linbo_sync, "LinboRemote", fake_linbo_remote)
 
     body = LinboRemoteRunBody(cmd="reboot", group="win10")
-    who = Mock(school="lehrer")
+    who = Mock(school="lehrer", user="admin")
     linbo_sync.run_linbo_remote(body=body, school="", who=who)
 
     assert captured["school"] == "lehrer"
