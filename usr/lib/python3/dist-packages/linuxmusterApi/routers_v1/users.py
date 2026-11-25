@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from linuxmusterTools.quotas import QuotaError, build_user_quota_args, set_user_quota
 from security import RoleChecker, UserChecker, AdminOfUserChecker, AuthenticatedUser, UserListChecker
-from .body_schemas import SetFirstPassword, SetCurrentPassword, UserList, User
+from .body_schemas import SetFirstPassword, SetCurrentPassword, UserList, User, UserQuotas
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from linuxmusterTools.ldapconnector import LMNUser, LMNStudent
 from linuxmusterTools.ldapconnector.models import check_password
 from linuxmusterTools.passwords import PasswordPolicyProvider
 import linuxmusterTools.quotas
+from utils import jobs
 from utils.checks import get_user_or_404
 
 
@@ -369,6 +371,54 @@ def get_user_quotas(user: str, who: AuthenticatedUser = Depends(UserChecker("GST
        return linuxmusterTools.quotas.get_user_quotas(user)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@router.post("/{user}/quotas", status_code=202, name='Set the individual quotas of a specific user')
+def post_user_quotas(user: str, quotas: UserQuotas, request: Request, who: AuthenticatedUser = Depends(AdminOfUserChecker("GS"))):
+    """
+    ## Set the individual quotas of a specific user.
+
+    `quotas` is a list of `share` (the school of the user or
+    *linuxmuster-global*), `quota` in MiB and an optional `comment`. A quota of
+    null sets the default of the role again, -1 is unlimited. `mailquota` has
+    a `quota` and a `comment`. What is left out is not changed.
+
+    With `apply` (default) the quotas are also written to the shares.
+
+    Returns the id of a background job, see `GET /jobs/{job}`.
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school)
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param user: samaccountname of the user
+    :type user: basestring
+    :param quotas: Quotas to set
+    :type quotas: UserQuotas
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    """
+
+
+    user_details = get_user_or_404(user, who.school)
+    values = [quota.model_dump() for quota in quotas.quotas]
+    mailquota = quotas.mailquota.model_dump() if quotas.mailquota else None
+
+    try:
+        # Refuse a wrong request now, not in the job
+        build_user_quota_args(user_details.cn, user_details.sophomorixSchoolname, values, mailquota)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    def set_quota():
+        try:
+            set_user_quota(user_details.cn, user_details.sophomorixSchoolname, values, mailquota, apply=quotas.apply)
+        except QuotaError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    return jobs.start_for(request, 'user-quota', who, user_details.sophomorixSchoolname, set_quota)
 
 @router.post("/{user}/parents", name='Add parents to a specific user')
 def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depends(AdminOfUserChecker("GS"))):

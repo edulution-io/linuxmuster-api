@@ -8,6 +8,7 @@ import ast
 import logging
 from time import time
 
+from . import jobs
 from .checks import check_tmp_dir, JOB_DIR
 from .notifications import notify_completion
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
@@ -139,6 +140,7 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     statuspath = f"{JOB_DIR}/{pid}.sophomorix.status"
     logpath = f"{JOB_DIR}/{pid}.sophomorix.log"
 
+    jobs.set_running(pid)
     start = datetime.now().strftime("%d %b %Y %H:%M:%S")
     with open(statuspath, 'w') as status:
         status.write(f"Process {pid} was started at {start} and is still running.")
@@ -183,6 +185,11 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     # Only now, the log of a school must not be read before it is filtered
     with open(statuspath, 'w') as status:
         status.write(f"Process {pid} was started at {start} and was completed at {now}")
+
+    if p.returncode == 0:
+        jobs.finish(pid, result={'log': log})
+    else:
+        jobs.finish(pid, error={'status': 500, 'detail': f'{command} failed with exit code {p.returncode}'}, result={'log': log})
 
     notify_completion(
         notifications_config,

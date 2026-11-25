@@ -216,6 +216,92 @@ class PrintPasswordsUsersParameter(BaseModel):
     nosplit_names: bool | None = False
     users: list
 
+class PrintPasswordsTeachersParameter(BaseModel):
+    """
+    Parameter to print the passwords of all teachers of a school.
+    The parameter school is required for global administrators.
+    format may be pdf or csv.
+    """
+
+
+    format: str | None = 'pdf'
+    one_per_page: bool | None = False
+    pdflatex: bool | None = True
+    school: str | None = ''
+    nosplit_names: bool | None = False
+
+class NewAccount(BaseModel):
+    """
+    Model to create an administrator or a bind user. Without password, one is
+    generated and returned.
+    """
+
+
+    password: str | None = None
+
+class UserShareQuota(BaseModel):
+    """
+    Individual quota of a user on one share in MiB, null for the default of
+    the role, -1 for unlimited.
+    """
+
+
+    comment: str | None = None
+    quota: int | None
+    share: str
+
+class UserMailQuota(BaseModel):
+    """
+    Individual mail quota of a user in MiB, null for the default of the role.
+    """
+
+
+    comment: str | None = None
+    quota: int | None
+
+class UserQuotas(BaseModel):
+    """
+    Individual quotas of a user. With apply, they are written to the shares
+    immediately.
+    """
+
+
+    apply: bool = True
+    mailquota: UserMailQuota | None = None
+    quotas: list[UserShareQuota] = []
+
+class SchoolSettingsBody(BaseModel):
+    """
+    Partial content of school.conf: {section: {setting: value}}.
+    """
+
+
+    settings: dict[str, dict[str, bool | int | str]]
+
+class CustomFieldSettings(BaseModel):
+    """
+    How one custom field is displayed. Attributes left out are not changed.
+    """
+
+
+    model_config = ConfigDict(extra='forbid')
+
+    editable: bool | None = None
+    show: bool | None = None
+    title: str | None = Field(default=None, max_length=100)
+
+class CustomFieldsBody(BaseModel):
+    """
+    Partial settings of the custom fields, by role and number of the field.
+    """
+
+
+    model_config = ConfigDict(extra='forbid')
+
+    custom: dict[str, dict[str, CustomFieldSettings]] = {}
+    customMulti: dict[str, dict[str, CustomFieldSettings]] = {}
+    proxyAddresses: dict[str, CustomFieldSettings] = {}
+
 class MgmtList(BaseModel):
     """
     Content of a management file list like /etc/linuxmuster/sophomorix/default-school/teachers.csv

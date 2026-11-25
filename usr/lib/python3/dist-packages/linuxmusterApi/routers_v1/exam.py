@@ -1,9 +1,10 @@
 import re
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from time import localtime, strftime
 
 from security import UserListChecker, AuthenticatedUser, RoleChecker
 from .body_schemas import UserList, StopExam
+from utils import jobs
 from utils.sophomorix import lmn_getSophomorixValue
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 
@@ -15,9 +16,11 @@ router = APIRouter(
 )
 
 @router.post("/start", name="Start exam")
-def start_exam_mode(userlist: UserList, who: AuthenticatedUser = Depends(UserListChecker("GST"))):
+def start_exam_mode(userlist: UserList, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(UserListChecker("GST"))):
     """
     ## Start exam for the authenticated user
+
+    With `background=true` it returns the id of a job, see `GET /jobs/{job}`.
 
     ### Access
     - global-administrators
@@ -40,23 +43,28 @@ def start_exam_mode(userlist: UserList, who: AuthenticatedUser = Depends(UserLis
         # Nothing to do
         raise HTTPException(status_code=400, detail=f"Missing userlist of members to handle")
 
-    try:
-        # Since the cn of the users are given and uniq across schools, no need to specify the school
-        sophomorixCommand = [
-            'sophomorix-exam-mode',
-            '--set',
-            '--supervisor', who.user,
-            '-j',
-            '--participants', ','.join(userlist.users)
-        ]
-        lmn_getSophomorixValue(sophomorixCommand, 'COMMENT_EN')
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting exam mode: {str(e)}")
+    def start():
+        try:
+            # Since the cn of the users are given and uniq across schools, no need to specify the school
+            sophomorixCommand = [
+                'sophomorix-exam-mode',
+                '--set',
+                '--supervisor', who.user,
+                '-j',
+                '--participants', ','.join(userlist.users)
+            ]
+            lmn_getSophomorixValue(sophomorixCommand, 'COMMENT_EN')
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error starting exam mode: {str(e)}")
+
+    return jobs.run_or_start(background, response, request, 'exam-start', who, who.school, start)
 
 @router.post("/stop", name="Stop exam")
-def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserListChecker("GST"))):
+def stop_exam_mode(stopexam: StopExam, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(UserListChecker("GST"))):
     """
     ## Stop exam of the authenticated user
+
+    With `background=true` it returns the id of a job, see `GET /jobs/{job}`.
 
     ### Access
     - global-administrators
@@ -102,20 +110,23 @@ def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserList
     # Escape chars in target directory, also for a target sent by the client
     target = re.sub(r'[^A-Za-z0-9_-]', '_', target)
 
-    try:
-        # Since the cn of the users are given and uniq across schools, no need to specify the school
-        sophomorixCommand = [
-            'sophomorix-exam-mode',
-            '--unset',
-            '--subdir', f'transfer/collected/{target}',
-            '-j',
-            '--participants', ','.join(stopexam.users)
-        ]
-        lmn_getSophomorixValue(sophomorixCommand, 'COMMENT_EN')
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error stoping exam mode: {str(e)}")
+    def stop():
+        try:
+            # Since the cn of the users are given and uniq across schools, no need to specify the school
+            sophomorixCommand = [
+                'sophomorix-exam-mode',
+                '--unset',
+                '--subdir', f'transfer/collected/{target}',
+                '-j',
+                '--participants', ','.join(stopexam.users)
+            ]
+            lmn_getSophomorixValue(sophomorixCommand, 'COMMENT_EN')
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error stoping exam mode: {str(e)}")
 
-    return {'target': target}
+        return {'target': target}
+
+    return jobs.run_or_start(background, response, request, 'exam-stop', who, who.school, stop)
 
 @router.get("/users", name="List all users in exammode")
 def users_exam_mode(who: AuthenticatedUser = Depends(RoleChecker("GST"))):
