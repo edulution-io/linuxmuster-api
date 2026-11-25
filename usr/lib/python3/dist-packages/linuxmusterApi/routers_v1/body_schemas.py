@@ -145,6 +145,7 @@ class SetFirstPassword(BaseModel):
 
     password: str | None = None
     set_current: bool = Field(default= False)
+    old_password: str | None = None
 
 class SetCurrentPassword(BaseModel):
     """
