@@ -4,6 +4,7 @@ from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
 from fastapi.security.utils import get_authorization_scheme_param
 from starlette import status
 import jwt
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing_extensions import Annotated
 
@@ -46,6 +47,9 @@ BASIC_AUTH = UTF8HTTPBasic(scheme_name='HTTPBasic')
 def generate_jwt(user, role, dn, school, secret):
     now = datetime.now(timezone.utc)
     payload = {
+        # Two logins within a second must not share a token, revoking one would
+        # revoke both
+        'jti': uuid.uuid4().hex,
         'iat': now,
         'exp': now + timedelta(hours=12),
         'user': user,
