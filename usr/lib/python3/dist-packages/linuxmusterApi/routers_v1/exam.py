@@ -61,7 +61,7 @@ def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserList
     ### Access
     - global-administrators
     - school-administrators
-    - teachers (own data)
+    - teachers (exams they started)
 
     The collected files go to `transfer/collected/<target>` of the supervisor.
     Without `target`, the directory is named `EXAM_<group_type>_<group_name>_<timestamp>`,
@@ -84,6 +84,12 @@ def stop_exam_mode(stopexam: StopExam, who: AuthenticatedUser = Depends(UserList
     if not stopexam.users:
         # Nothing to do
         raise HTTPException(status_code=400, detail=f"Missing userlist of members to handle")
+
+    if who.role == 'teacher':
+        for user in stopexam.users:
+            examteacher = lr.getval(f"/users/exam/{user.removesuffix('-exam')}", 'examTeacher')
+            if examteacher and examteacher != who.user:
+                raise HTTPException(status_code=403, detail=f"The exam of {user} was started by another teacher.")
 
     if stopexam.target:
         target = stopexam.target

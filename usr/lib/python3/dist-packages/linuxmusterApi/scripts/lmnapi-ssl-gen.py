@@ -10,6 +10,7 @@ uvicorn --> ssl_certfile and ssl_keyfile, and then restart the API.
 """
 
 
+import os
 import sys
 import socket
 import random
@@ -34,6 +35,9 @@ cert.gmtime_adj_notAfter(10 * 365 * 24 * 60 * 60) # 10 years
 cert.set_issuer(cert.get_subject())
 cert.sign(key, 'sha512')
 
-with open(certificate_path, 'wb') as f:
+# Contains the private key: created with its final permissions
+fd = os.open(certificate_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, 'wb') as f:
     f.write(dump_privatekey(FILETYPE_PEM, key))
     f.write(dump_certificate(FILETYPE_PEM, cert))

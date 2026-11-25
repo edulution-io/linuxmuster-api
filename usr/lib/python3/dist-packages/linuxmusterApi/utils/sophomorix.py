@@ -8,8 +8,9 @@ import ast
 import logging
 from time import time
 
-from .checks import check_tmp_dir
+from .checks import check_tmp_dir, JOB_DIR
 from .notifications import notify_completion
+from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 
 
 class SophomorixProcess(threading.Thread):
@@ -64,15 +65,63 @@ def parse_sophomorix_json(raw_output):
     return jsonDict
 
 
+def filter_check_result(results, school):
+    """
+    Keep only what concerns one school. sophomorix-check always works on all
+    schools of the server.
+
+    :param results: Parsed output of sophomorix-check
+    :type results: dict
+    :param school: School to keep
+    :type school: basestring
+    :return: Filtered results
+    :rtype: dict
+    """
+
+    path = f'/{school}/'
+    checked = results.get('CHECK_RESULT', {})
+    filtered = {}
+
+    for action in ('ADD', 'UPDATE', 'KILL', 'ERROR'):
+        entries = checked.get(action) or {}
+        kept = {}
+        for name, entry in entries.items():
+            entry_school = entry.get('sophomorixSchoolname') if isinstance(entry, dict) else None
+            if entry_school is None and action in ('UPDATE', 'KILL'):
+                entry_school = lr.getval(f'/users/{name}', 'sophomorixSchoolname')
+            if entry_school == school or (entry_school is None and path in json.dumps(entry)):
+                kept[name] = entry
+        if kept:
+            filtered[action] = kept
+        filtered[f'{action}LIST'] = [name for name in checked.get(f'{action}LIST') or [] if str(name) in kept]
+
+    summary = []
+    for line in results.get('SUMMARY') or []:
+        for action, values in line.items():
+            if action == 'NOCHANGE':
+                continue
+            if action in ('ADD', 'UPDATE', 'KILL', 'ERROR'):
+                values = {**values, 'RESULT': len(filtered.get(action, {}))}
+            summary.append({action: values})
+
+    files = results.get('FILES') or {}
+    return {
+        **results,
+        'CHECK_RESULT': filtered,
+        'FILES': {name: value for name, value in files.items() if path in name},
+        'SUMMARY': summary,
+    }
+
+
 def process_user(cmd, pid, command='', school='', caller='', notifications_config=None):
     """
     Run a (possibly multi-command, ';'-chained) sophomorix shell script in
-    the background, tracking progress in /tmp/lmnapi/{pid}.sophomorix.status
+    the background, tracking progress in /run/lmnapi/{pid}.sophomorix.status
     and, once done, best-effort notifying `notifications_config`'s callback
     (see utils/notifications.py) — a no-op if not configured.
 
     :param cmd: shell script to run (each sub-command already redirects its
-        own output to /tmp/lmnapi/{pid}.sophomorix.log)
+        own output to /run/lmnapi/{pid}.sophomorix.log)
     :type cmd: basestring
     :param pid: job id, used for both the status/log file names
     :type pid: basestring
@@ -87,8 +136,8 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     """
 
     check_tmp_dir()
-    statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
-    logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
+    statuspath = f"{JOB_DIR}/{pid}.sophomorix.status"
+    logpath = f"{JOB_DIR}/{pid}.sophomorix.log"
 
     start = datetime.now().strftime("%d %b %Y %H:%M:%S")
     with open(statuspath, 'w') as status:
@@ -98,8 +147,6 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     stdout, stderr = p.communicate()
 
     now = datetime.now().strftime("%d %b %Y %H:%M:%S")
-    with open(statuspath, 'w') as status:
-        status.write(f"Process {pid} was started at {start} and was completed at {now}")
 
     try:
         with open(logpath, 'r') as f:
@@ -120,11 +167,22 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
                     for user_update in tuple(results["CHECK_RESULT"]["UPDATE"]):
                         if user_update in results["CHECK_RESULT"]["KILL"]:
                             del results["CHECK_RESULT"]["UPDATE"][user_update]
+            if school not in ('', 'global'):
+                results = filter_check_result(results, school)
             log = json.dumps(results)
             with open(logpath, 'w') as f:
                 f.write(log)
         except (IndexError, SyntaxError, ValueError) as e:
+            if school not in ('', 'global'):
+                # The raw output names users of all schools
+                log = 'The output of sophomorix-check could not be read.'
+                with open(logpath, 'w') as f:
+                    f.write(log)
             logging.warning(f"Job {pid}: could not parse sophomorix-check output as JSON, leaving raw log as-is: {e}")
+
+    # Only now, the log of a school must not be read before it is filtered
+    with open(statuspath, 'w') as status:
+        status.write(f"Process {pid} was started at {start} and was completed at {now}")
 
     notify_completion(
         notifications_config,

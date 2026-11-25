@@ -11,6 +11,9 @@ from linuxmusterTools.common import LdapNotProvisionedError
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from linuxmusterTools.ldapconnector.models import check_password
 
+from security.login_failures import add_failure, clear, is_blocked
+from security.rate_limiter import settings
+
 
 class UTF8HTTPBasic(HTTPBasic):
     """
@@ -41,8 +44,10 @@ class UTF8HTTPBasic(HTTPBasic):
 BASIC_AUTH = UTF8HTTPBasic(scheme_name='HTTPBasic')
 
 def generate_jwt(user, role, dn, school, secret):
+    now = datetime.now(timezone.utc)
     payload = {
-        'exp': datetime.now(timezone.utc) + timedelta(hours=12),
+        'iat': now,
+        'exp': now + timedelta(hours=12),
         'user': user,
         'role': role,
         'dn': dn,
@@ -57,6 +62,12 @@ class BasicAuthChecker:
 
 
     def __call__(self, request: Request, credentials: Annotated[HTTPBasicCredentials, Depends(BASIC_AUTH)]) -> str:
+        limits = settings(request)
+        limit, window = limits.get('user_failures', 20), limits.get('user_window', 300)
+
+        if is_blocked(credentials.username, limit, window):
+            raise HTTPException(status_code=429, detail="Too Many Requests")
+
         try:
             user = lr.get(f'/users/{credentials.username}', as_dict=False)
         except LdapNotProvisionedError:
@@ -71,9 +82,11 @@ class BasicAuthChecker:
             )
 
         if check_password(user.dn, credentials.password):
+            clear(credentials.username)
             return generate_jwt(user.cn, user.sophomorixRole, user.dn, user.sophomorixSchoolname,
                                 request.app.state.secret)
 
+        add_failure(credentials.username, window)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Wrong credentials, please send a valid username and password.'

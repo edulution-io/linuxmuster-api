@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from security import RoleChecker, UserChecker, AuthenticatedUser, UserListChecker
+from security import RoleChecker, UserChecker, AdminOfUserChecker, AuthenticatedUser, UserListChecker
 from .body_schemas import SetFirstPassword, SetCurrentPassword, UserList, User
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from linuxmusterTools.ldapconnector import LMNUser, LMNStudent
+from linuxmusterTools.ldapconnector.models import check_password
 from linuxmusterTools.passwords import PasswordPolicyProvider
 import linuxmusterTools.quotas
 from utils.checks import get_user_or_404
@@ -16,6 +17,32 @@ router = APIRouter(
     tags=["Users"],
     responses={404: {"description": "Not found"}},
 )
+
+def check_own_attributes(user_details, data):
+    """
+    Users who are no administrator may only change some attributes of their
+    own account: the photo, and the fields the school made editable for their
+    role. Values which do not change anything are accepted, since a form sends
+    back what it received.
+
+    :param user_details: LDAP object of the user
+    :param data: Attributes to write
+    :raises HTTPException 403: naming the refused attributes
+    """
+
+
+    refused = []
+    for attribute, value in data.items():
+        if attribute == 'thumbnailPhoto' or value == getattr(user_details, attribute, None):
+            continue
+        if not value and not getattr(user_details, attribute, None):
+            continue
+        field = user_details.customFields.get(attribute) or {}
+        if not field.get('canWrite'):
+            refused.append(attribute)
+
+    if refused:
+        raise HTTPException(status_code=403, detail=f"You are not allowed to change {', '.join(sorted(refused))}.")
 
 @router.get("/", name="List all users")
 def get_all_users(who: AuthenticatedUser = Depends(RoleChecker("G"))):
@@ -85,8 +112,8 @@ def post_user_data(user: str, user_details: User, who: AuthenticatedUser = Depen
     ### Access
     - global-administrators
     - school-administrators
-    - teachers
-    - students
+    - teachers (students)
+    - all users (own photo, and the fields the school made editable)
 
     \f
     :param user: cn of the user to update
@@ -98,12 +125,15 @@ def post_user_data(user: str, user_details: User, who: AuthenticatedUser = Depen
     """
 
 
-    get_user_or_404(user, who.school)
+    current = get_user_or_404(user, who.school)
 
     data = {}
     for key, value in user_details.__dict__.items():
         if (key == "thumbnailPhoto" and value is not None) or value:
             data[key] = value
+
+    if who.user.lower() == user.lower() and who.role not in ('globaladministrator', 'schooladministrator'):
+        check_own_attributes(current, data)
 
     UserWriter = LMNUser(user.lower(), who.school)
     UserWriter.setattr(data=data)
@@ -233,12 +263,15 @@ def set_random_first_user_password(user: str, who: AuthenticatedUser = Depends(U
     return {"password": password}
 
 @router.post("/{user}/set-current-password", name="Set user's current password")
-def set_current_user_password(user: str, password: SetCurrentPassword, who: AuthenticatedUser = Depends(UserChecker("GST"))):
+def set_current_user_password(user: str, password: SetCurrentPassword, request: Request, who: AuthenticatedUser = Depends(UserChecker("GST"))):
     """
     ## Set the current password of the user.
 
     The **current password** is the password actually used by the user, not
     readable in the LDAP tree.
+
+    *old_password* is checked if given. For the own account it is required if
+    *security.require_old_password* is set in config.yml.
 
     The **first password**, also known as default password, is the readable password
     in the LDAP account, and the one to which it's possible to retrograde if the
@@ -262,6 +295,14 @@ def set_current_user_password(user: str, password: SetCurrentPassword, who: Auth
 
 
     user_details = get_user_or_404(user, who.school)
+
+    if who.user.lower() == user.lower():
+        # A stolen token must not be enough to take the account over.
+        if password.old_password is None:
+            if request.app.state.security.get('require_old_password', False):
+                raise HTTPException(status_code=400, detail="The current password is required.")
+        elif not check_password(user_details.distinguishedName, password.old_password):
+            raise HTTPException(status_code=403, detail="The current password is wrong.")
 
     result = password_policy_provider.validate(
         password.password, role=user_details.sophomorixRole, school=who.school, username=user
@@ -312,7 +353,7 @@ def get_user_quotas(user: str, who: AuthenticatedUser = Depends(UserChecker("GST
         raise HTTPException(status_code=404, detail=str(e))
 
 @router.post("/{user}/parents", name='Add parents to a specific user')
-def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depends(UserChecker("GS"))):
+def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depends(AdminOfUserChecker("GS"))):
     """
     ## Add parents to a specific user.
 
@@ -339,7 +380,7 @@ def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depen
     UserWriter.add_parents(parents.users)
 
 @router.delete("/{user}/parents", name='Delete parents from a specific user')
-def delete_user_parents(user: str, parents: UserList, who: AuthenticatedUser = Depends(UserChecker("GS"))):
+def delete_user_parents(user: str, parents: UserList, who: AuthenticatedUser = Depends(AdminOfUserChecker("GS"))):
     """
     ## Delete parents from a specific user.
 

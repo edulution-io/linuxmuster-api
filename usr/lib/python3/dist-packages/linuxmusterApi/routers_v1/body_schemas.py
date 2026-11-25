@@ -154,6 +154,7 @@ class SetCurrentPassword(BaseModel):
 
 
     password: str
+    old_password: str | None = None
     set_first: bool= Field(default= False)
 
 class StopExam(BaseModel):

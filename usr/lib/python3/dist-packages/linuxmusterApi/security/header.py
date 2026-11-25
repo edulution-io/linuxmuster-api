@@ -7,9 +7,14 @@ from pydantic import BaseModel
 
 from linuxmusterTools.common import LdapNotProvisionedError
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
+from linuxmusterTools.ldapconnector.checks import get_account_state
 
 from vars import API_V1_PREFIX
+from security.revocation import is_revoked
 from security.scope import allows
+
+# Seconds. iat has no fraction, pwdLastSet does.
+CLOCK_TOLERANCE = 1
 
 
 class AuthenticatedUser(BaseModel):
@@ -63,15 +68,21 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
     try:
         payload = jwt.decode(apikey, secret, algorithms=["HS512"])
         user = payload['user']
-    except (jwt.exceptions.InvalidSignatureError, jwt.exceptions.DecodeError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API Key",
-        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Expired API Key",
+        )
+    except (jwt.exceptions.InvalidTokenError, KeyError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+        )
+
+    if is_revoked(apikey):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
         )
 
     # role may be eventually None
@@ -89,12 +100,39 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
             detail="Invalid API Key",
         )
 
+    check_session(user_details['distinguishedName'], payload.get('iat'))
+
     return AuthenticatedUser(
         dn=user_details['distinguishedName'],
         user=user,
         role=user_details['sophomorixRole'],
         school=user_details.get('sophomorixSchoolname', "")
     )
+
+
+def check_session(dn, issued_at):
+    """
+    Refuse the token of a disabled account, and one issued before the last
+    password change: whoever changes the password expects to be the only one
+    left with access.
+
+    :param dn: distinguishedName of the user
+    :type dn: basestring
+    :param issued_at: iat claim, None for a token of an older version
+    :type issued_at: int
+    """
+
+    state = get_account_state(dn)
+    valid = state is not None and not state['disabled']
+
+    if valid and issued_at is not None and state['pwd_last_set'] is not None:
+        valid = issued_at + CLOCK_TOLERANCE >= state['pwd_last_set'].timestamp()
+
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+        )
 
 
 def check_host_header(hostkey, client_ip, keys, host_key_auth_enable, method, path) -> AuthenticatedUser:
@@ -124,7 +162,10 @@ def check_host_header(hostkey, client_ip, keys, host_key_auth_enable, method, pa
 
         if hmac.compare_digest(hostkey, secret):
             user = key.get('user', None)
-            valid_ips = key.get('ips', [])
+            valid_ips = key.get('ips') or []
+            # 'in' on a string would accept 10.0.0.1 for 10.0.0.10
+            if isinstance(valid_ips, str):
+                valid_ips = [valid_ips]
 
             if valid_ips and client_ip not in valid_ips:
                 raise HTTPException(
