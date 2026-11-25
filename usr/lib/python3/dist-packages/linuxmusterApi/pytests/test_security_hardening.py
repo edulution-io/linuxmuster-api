@@ -309,3 +309,9 @@ def test_the_log_of_a_check_is_not_read_before_it_is_completed(run_dir):
     for status, log in (('', []), ('is still running', []), ('was completed at 1', ['all schools'])):
         (run_dir / 'abc.check.1.sophomorix.status').write_text(status)
         assert listmanagement.get_status_sophomorix_apply('abc.check.1', admin)['log'] == log
+
+
+def test_a_job_id_can_not_leave_the_job_directory():
+    with pytest.raises(HTTPException) as error:
+        listmanagement.get_status_sophomorix_apply('abc./../../x', who('schooladministrator', 'sa', 'abc'))
+    assert error.value.status_code == 404
