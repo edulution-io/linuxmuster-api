@@ -30,7 +30,12 @@ def new_job_log(prefix):
 
 
     check_tmp_dir()
-    handle, logpath = tempfile.mkstemp(prefix=prefix, suffix='.sophomorix.log', dir=JOB_DIR)
+    path = os.path.normpath(os.path.join(JOB_DIR, prefix))
+    if not path.startswith(f'{JOB_DIR}/'):
+        raise HTTPException(status_code=400, detail="Invalid job id.")
+
+    directory, name = os.path.split(path)
+    handle, logpath = tempfile.mkstemp(prefix=name, suffix='.sophomorix.log', dir=directory)
     # Only the path is needed, an open descriptor per job would pile up
     os.close(handle)
     return logpath, os.path.basename(logpath).removesuffix('.sophomorix.log')

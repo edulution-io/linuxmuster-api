@@ -79,6 +79,25 @@ def test_a_revoked_token_is_refused(ldap_user):
     assert header.check_user_header(token(jti='2'), SECRET)
 
 
+def test_a_revoked_token_is_refused_in_any_spelling(ldap_user):
+    revoked = token(jti='3')
+    # Padding is accepted, though a token is encoded without
+    assert header.check_user_header(revoked + '==', SECRET)
+    revocation.revoke(revoked, 2**40)
+    for spelling in (revoked, revoked + '=='):
+        with pytest.raises(HTTPException):
+            header.check_user_header(spelling, SECRET)
+
+
+def test_a_job_log_stays_in_the_job_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(listmanagement, 'JOB_DIR', str(tmp_path))
+    monkeypatch.setattr(listmanagement, 'check_tmp_dir', lambda: None)
+    path, pid = listmanagement.new_job_log('default-school.')
+    assert path == f'{tmp_path}/{pid}.sophomorix.log' and pid.startswith('default-school.')
+    with pytest.raises(HTTPException):
+        listmanagement.new_job_log('../x.')
+
+
 def test_an_ip_given_as_string_is_not_compared_as_substring(monkeypatch, ldap_user):
     keys = {'server': {'secret': 's', 'user': 'jdoe', 'ips': '10.0.0.10'}}
     with pytest.raises(HTTPException):
