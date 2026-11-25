@@ -10,6 +10,7 @@ from typing_extensions import Annotated
 
 from linuxmusterTools.common import LdapNotProvisionedError
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
+from linuxmusterTools.ldapconnector.checks import get_account_state, password_marker
 from linuxmusterTools.ldapconnector.models import check_password
 
 from security.login_failures import add_failure, clear, is_blocked
@@ -44,13 +45,19 @@ class UTF8HTTPBasic(HTTPBasic):
 # The name main.py declares in the OpenAPI schema, instead of the class name.
 BASIC_AUTH = UTF8HTTPBasic(scheme_name='HTTPBasic')
 
-def generate_jwt(user, role, dn, school, secret):
+def generate_jwt(user, role, dn, school, secret, password_state=None):
+    """
+    :param password_state: Result of get_account_state(), read before the
+        password was checked. Binds the token to this password.
+    """
+
     now = datetime.now(timezone.utc)
     payload = {
         # Two logins within a second must not share a token, revoking one would
         # revoke both
         'jti': uuid.uuid4().hex,
         'iat': now,
+        'pwd': password_marker(password_state),
         'exp': now + timedelta(hours=12),
         'user': user,
         'role': role,
@@ -85,10 +92,13 @@ class BasicAuthChecker:
                 detail='Malformated username, please send a valid username and password.'
             )
 
+        # Before the check: a change in between makes the token invalid
+        state = get_account_state(user.dn)
+
         if check_password(user.dn, credentials.password):
             clear(credentials.username)
             return generate_jwt(user.cn, user.sophomorixRole, user.dn, user.sophomorixSchoolname,
-                                request.app.state.secret)
+                                request.app.state.secret, state)
 
         add_failure(credentials.username, window)
         raise HTTPException(

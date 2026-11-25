@@ -28,3 +28,12 @@ def test_an_empty_body_changes_nothing(writer):
     users.post_user_data('max', User(), GLOBALADMIN)
     writer.delattr.assert_not_called()
     writer.setattr.assert_not_called()
+
+
+def test_a_no_op_for_a_locked_field_is_not_written(writer, monkeypatch):
+    student = AuthenticatedUser(dn='', user='max', role='student', school='default-school')
+    monkeypatch.setattr(users, 'get_user_or_404', lambda *a: SimpleNamespace(cn='max', displayName='Max', sophomorixCustom1='', customFields={}))
+    # An administrator fills the field after the check, see the data of the writer
+    users.post_user_data('max', User(sophomorixCustom1='', displayName='Max'), student)
+    writer.delattr.assert_not_called()
+    writer.setattr.assert_not_called()

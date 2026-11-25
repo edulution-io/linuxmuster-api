@@ -1,3 +1,4 @@
+import re
 from unittest.mock import Mock
 
 import pytest
@@ -421,3 +422,16 @@ def test_image_paths_resolve_to_the_intended_endpoint(method, path, expected):
             assert route.endpoint.__name__ == expected
             return
     pytest.fail(f"{method} {path} matches no route")
+
+
+@pytest.mark.parametrize("change", [
+    # The last occurrence of a key counts
+    lambda info: info + '\nimagesize=""\n',
+    lambda info: re.sub(r'timestamp=.*', 'timestamp="yesterday"', info),
+])
+def test_an_info_the_loader_refuses_is_not_written(manager, change):
+    manager.groups = {"win11": make_group()}
+    with pytest.raises(HTTPException) as error:
+        linbo.save_image_extras("win11", LinboImageExtrasBody(info=change(INFO)), None, False, None)
+    assert error.value.status_code == 400
+    manager.save_extras.assert_not_called()

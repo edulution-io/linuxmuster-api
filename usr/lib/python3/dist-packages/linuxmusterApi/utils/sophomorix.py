@@ -66,6 +66,15 @@ def parse_sophomorix_json(raw_output):
     return jsonDict
 
 
+def file_school(filename):
+    """
+    School of a list: students.csv of default-school, abc.students.csv of abc.
+    """
+
+    school, separator, _ = filename.removesuffix('.csv').rpartition('.')
+    return school if separator else 'default-school'
+
+
 def filter_check_result(results, school):
     """
     Keep only what concerns one school. sophomorix-check always works on all
@@ -88,7 +97,10 @@ def filter_check_result(results, school):
         kept = {}
         for name, entry in entries.items():
             entry_school = entry.get('sophomorixSchoolname') if isinstance(entry, dict) else None
-            if entry_school is None and action in ('UPDATE', 'KILL'):
+            if action == 'ERROR':
+                # The key is the name of the file and the line
+                entry_school = file_school(name.split(':', 1)[0])
+            elif entry_school is None and action in ('UPDATE', 'KILL'):
                 entry_school = lr.getval(f'/users/{name}', 'sophomorixSchoolname')
             if entry_school == school or (entry_school is None and path in json.dumps(entry)):
                 kept[name] = entry
@@ -105,10 +117,26 @@ def filter_check_result(results, school):
                 values = {**values, 'RESULT': len(filtered.get(action, {}))}
             summary.append({action: values})
 
+    # sophomorix-check stops at some errors, without a result. The message may
+    # name users of another school, unless it is about a file of this one.
+    output = []
+    if 'CHECK_RESULT' not in results:
+        for line in results.get('OUTPUT') or []:
+            if line.get('TYPE') not in ('ERROR', 'WARNING'):
+                continue
+            named = re.findall(r'[\w.-]+\.csv', line.get('MESSAGE_EN', ''))
+            if not named or any(file_school(filename) != school for filename in named):
+                message = 'sophomorix-check stopped with an error, a global administrator can see the details.'
+                line = {**line, 'MESSAGE_EN': message, 'MESSAGE_DE': message}
+            output.append(line)
+
     files = results.get('FILES') or {}
+    scoped = {key: results[key] for key in ('SCRIPTNAME', 'JSONINFO', 'JSONCOMMENT') if key in results}
+    if 'CHECK_RESULT' in results:
+        scoped['CHECK_RESULT'] = filtered
     return {
-        **results,
-        'CHECK_RESULT': filtered,
+        **scoped,
+        'OUTPUT': output,
         'FILES': {name: value for name, value in files.items() if path in name},
         'SUMMARY': summary,
     }

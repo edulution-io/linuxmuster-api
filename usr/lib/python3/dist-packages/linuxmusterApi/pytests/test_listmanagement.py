@@ -10,6 +10,7 @@ sys.path.append(LOCAL_API_PATH)
 from main import app
 import routers_v1.listmanagement as listmanagement
 
+from utils import checks
 
 client = TestClient(app)
 USERS = [GLOBALADMIN, SCHOOLADMIN, TEACHER, STUDENT, STAFF, PARENT]
@@ -25,7 +26,7 @@ def fake_process_user(monkeypatch):
 
     tempfile.mkstemp() in the endpoint itself still really creates the empty
     {pid}.sophomorix.log placeholder on disk (that part isn't mocked), so
-    clean those up afterward instead of littering /tmp/lmnapi.
+    clean those up afterward instead of littering the job directory.
     """
 
     calls = []
@@ -33,7 +34,7 @@ def fake_process_user(monkeypatch):
     yield calls
     for args, kwargs in calls:
         pid = args[1]
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
         if os.path.isfile(logpath):
             os.remove(logpath)
 
@@ -137,9 +138,8 @@ class TestSophomorixApplyStatus:
         # Same files whether the job originated from sophomorix-check or
         # sophomorix-apply — the status endpoint doesn't care which.
         pid = 'pytest.status.check'
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
-        os.makedirs('/tmp/lmnapi', exist_ok=True)
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
         with open(logpath, 'w') as f:
             f.write('line1\nline2\n')
         with open(statuspath, 'w') as f:

@@ -1,13 +1,14 @@
+import fcntl
 import os
 import subprocess
-import threading
-from collections import defaultdict
+import zlib
+from contextlib import contextmanager
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from security import RoleChecker, AuthenticatedUser, check_print_permissions
 from utils import jobs
-from utils.checks import get_schoolclass_or_404, get_project_or_404, check_valid_school_or_404
+from utils.checks import get_schoolclass_or_404, get_project_or_404, check_tmp_dir, check_valid_school_or_404, JOB_DIR
 from .body_schemas import PrintPasswordsSchoolclassesParameter, PrintPasswordsUsersParameter, PrintPasswordsProjectsParameter, PrintPasswordsTeachersParameter
 
 
@@ -19,16 +20,30 @@ router = APIRouter(
 
 PRINT_DIR = '/var/lib/sophomorix/print-data'
 
-# sophomorix names the files after the caller, so one user can only print one
-# thing at a time
-_caller_locks = defaultdict(threading.Lock)
+# Number of locks the callers are spread over
+PRINT_LOCKS = 64
+
+@contextmanager
+def print_lock(user):
+    """
+    sophomorix names the files after the caller, so one user can only print one
+    thing at a time, whatever worker handles the request.
+    """
+
+
+    check_tmp_dir()
+    path = os.path.join(JOB_DIR, f'print.{zlib.crc32(user.encode()) % PRINT_LOCKS}.lock')
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), 'w') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
 
 def print_file(who, config, filename, **selection):
     """
-    Run sophomorix-print and return the file it created.
+    Run sophomorix-print and return the content of the file it created.
 
-    The file of a previous run is removed first: if the compilation fails
-    without an error, it would be sent instead of the requested one.
+    The files of a previous run are removed first: if the compilation fails
+    without an error, it would be sent instead of the requested one, or
+    converted again from its intermediate files.
 
     :raises HTTPException 500: the file is missing, e.g. because LaTeX failed
     """
@@ -36,9 +51,11 @@ def print_file(who, config, filename, **selection):
 
     path = os.path.join(PRINT_DIR, filename)
 
-    with _caller_locks[who.user]:
-        if os.path.isfile(path):
-            os.unlink(path)
+    with print_lock(who.user):
+        for extension in ('csv', 'pdf', 'ps', 'dvi', 'tex'):
+            old = f'{os.path.splitext(path)[0]}.{extension}'
+            if os.path.isfile(old):
+                os.unlink(old)
 
         sophomorixprint_cmd(who, config, **selection)
 
