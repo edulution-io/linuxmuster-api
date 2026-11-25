@@ -39,6 +39,7 @@ from linuxmusterTools.ldapconnector.checks import valid_schools
 from linuxmusterTools.devices import Devices
 
 from linuxmusterTools.linbo import *
+from linuxmusterTools.linbo.models import ImageInfo
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.common.checks import NameChecker
 
@@ -1681,6 +1682,15 @@ def save_image_extras(
 
     if diff and group.diff_image is None:
         raise HTTPException(status_code=404, detail=f"Image {image_name} has no differential image")
+
+    # An incomplete .info makes the image unreadable
+    keys = {
+        key for key, separator, value in (line.strip().partition('=') for line in body.info.splitlines())
+        if separator and value.strip('"')
+    }
+    missing = [field for field in ImageInfo.__dataclass_fields__ if field not in keys]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"info is incomplete, missing: {', '.join(missing)}")
 
     run_linbo_image_operation(
         lambda: manager.save_extras(image_name, body.model_dump(), timestamp=timestamp, diff=diff)
