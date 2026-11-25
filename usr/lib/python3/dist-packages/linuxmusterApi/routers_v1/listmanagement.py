@@ -248,15 +248,16 @@ def get_status_sophomorix_apply(pid: str, who: AuthenticatedUser = Depends(RoleC
         raise HTTPException(status_code=404, detail=f"Log file {logpath} not found.")
 
     try:
-        with open(logpath, 'r') as f:
-            log = f.readlines()
-
+        # The status first: the log of a check is only reduced to the school of
+        # the user when the job is completed
         with open(statuspath, 'r') as f:
             status = f.read()
 
-        if who.school != 'global' and pid.startswith(f'{who.school}.check.') and 'still running' in status:
-            # Not yet reduced to the school of the user
+        if who.school != 'global' and pid.startswith(f'{who.school}.check.') and 'was completed at' not in status:
             log = []
+        else:
+            with open(logpath, 'r') as f:
+                log = f.readlines()
 
         return {"status": status, "log": log}
 

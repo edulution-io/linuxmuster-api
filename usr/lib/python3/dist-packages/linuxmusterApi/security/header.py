@@ -7,14 +7,11 @@ from pydantic import BaseModel
 
 from linuxmusterTools.common import LdapNotProvisionedError
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
-from linuxmusterTools.ldapconnector.checks import get_account_state
+from linuxmusterTools.ldapconnector.checks import get_account_state, password_marker
 
 from vars import API_V1_PREFIX
 from security.revocation import is_revoked
 from security.scope import allows
-
-# Seconds. iat has no fraction, pwdLastSet does.
-CLOCK_TOLERANCE = 1
 
 
 class AuthenticatedUser(BaseModel):
@@ -100,7 +97,7 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
             detail="Invalid API Key",
         )
 
-    check_session(user_details['distinguishedName'], payload.get('iat'))
+    check_session(user_details['distinguishedName'], payload)
 
     return AuthenticatedUser(
         dn=user_details['distinguishedName'],
@@ -110,23 +107,23 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
     )
 
 
-def check_session(dn, issued_at):
+def check_session(dn, payload):
     """
-    Refuse the token of a disabled account, and one issued before the last
-    password change: whoever changes the password expects to be the only one
+    Refuse the token of a disabled account, and one issued for another password: whoever changes the password expects to be the only one
     left with access.
 
     :param dn: distinguishedName of the user
     :type dn: basestring
-    :param issued_at: iat claim, None for a token of an older version
-    :type issued_at: int
+    :param payload: Claims of the token. Without pwd it was issued by an older
+        version and stays valid until it expires.
+    :type payload: dict
     """
 
     state = get_account_state(dn)
     valid = state is not None and not state['disabled']
 
-    if valid and issued_at is not None and state['pwd_last_set'] is not None:
-        valid = issued_at + CLOCK_TOLERANCE >= state['pwd_last_set'].timestamp()
+    if valid and 'pwd' in payload:
+        valid = payload['pwd'] == password_marker(state)
 
     if not valid:
         raise HTTPException(

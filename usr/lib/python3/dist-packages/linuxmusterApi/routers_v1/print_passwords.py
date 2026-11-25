@@ -1,10 +1,13 @@
+import fcntl
 import os
 import subprocess
-from fastapi.responses import FileResponse
-from fastapi import APIRouter, Depends, HTTPException
+import zlib
+from contextlib import contextmanager
+
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from security import RoleChecker, AuthenticatedUser, check_print_permissions
-from utils.checks import get_schoolclass_or_404, get_project_or_404
+from utils.checks import get_schoolclass_or_404, get_project_or_404, check_tmp_dir, JOB_DIR
 from .body_schemas import PrintPasswordsSchoolclassesParameter, PrintPasswordsUsersParameter, PrintPasswordsProjectsParameter
 
 
@@ -16,29 +19,59 @@ router = APIRouter(
 
 PRINT_DIR = '/var/lib/sophomorix/print-data'
 
-def remove_old_output(filename):
+# Number of locks the callers are spread over
+PRINT_LOCKS = 64
+
+@contextmanager
+def print_lock(user):
     """
-    Remove the file of a previous run: if the compilation fails without an
-    error, it would be sent instead of the requested one.
+    sophomorix names the files after the caller, so one user can only print one
+    thing at a time, whatever worker handles the request.
     """
 
 
-    path = os.path.join(PRINT_DIR, filename)
-    if os.path.isfile(path):
-        os.unlink(path)
+    check_tmp_dir()
+    path = os.path.join(JOB_DIR, f'print.{zlib.crc32(user.encode()) % PRINT_LOCKS}.lock')
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), 'w') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
 
-def output_response(filename, mtype):
+def print_file(who, config, filename, **selection):
     """
-    Send the file sophomorix-print should have created.
+    Run sophomorix-print and return the content of the file it created.
+
+    The files of a previous run are removed first: if the compilation fails
+    without an error, it would be sent instead of the requested one, or
+    converted again from its intermediate files.
 
     :raises HTTPException 500: the file is missing, e.g. because LaTeX failed
     """
 
 
     path = os.path.join(PRINT_DIR, filename)
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=500, detail=f"{filename} could not be created, see the log of sophomorix-print.")
-    return FileResponse(path=path, filename=filename, media_type=mtype)
+
+    with print_lock(who.user):
+        for extension in ('csv', 'pdf', 'ps', 'dvi', 'tex'):
+            old = f'{os.path.splitext(path)[0]}.{extension}'
+            if os.path.isfile(old):
+                os.unlink(old)
+
+        sophomorixprint_cmd(who, config, **selection)
+
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=500, detail=f"{filename} could not be created, see the log of sophomorix-print.")
+
+        with open(path, 'rb') as f:
+            return f.read()
+
+def print_response(who, config, filename, mtype, **selection):
+    """
+    Send the file sophomorix-print created.
+    """
+
+
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return Response(print_file(who, config, filename, **selection), media_type=mtype, headers=headers)
 
 def sophomorixprint_cmd(who, config, schoolclasses=[], users=[]):
     """
@@ -136,10 +169,7 @@ def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, 
         prefix = 'multiclass'
 
     filename = f'{prefix}-{who.user}.{config.format}'
-    remove_old_output(filename)
-    sophomorixprint_cmd(who, config, schoolclasses=config.schoolclasses)
-
-    return output_response(filename, mtype)
+    return print_response(who, config, filename, mtype, schoolclasses=config.schoolclasses)
 
 @router.post("/projects", name="Print passwords from projects")
 def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: AuthenticatedUser = Depends(RoleChecker("GST"))):
@@ -193,10 +223,7 @@ def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: Authe
     users_to_print = check_print_permissions(who, users_to_print)
 
     filename = f'user-{who.user}.{config.format}'
-    remove_old_output(filename)
-    sophomorixprint_cmd(who, config, users=users_to_print)
-
-    return output_response(filename, mtype)
+    return print_response(who, config, filename, mtype, users=users_to_print)
 
 
 @router.post("/users", name="Print passwords of users")
@@ -246,7 +273,4 @@ def print_passwords_users(config: PrintPasswordsUsersParameter, who: Authenticat
     users_to_print = check_print_permissions(who, users_to_print)
 
     filename = f'user-{who.user}.{config.format}'
-    remove_old_output(filename)
-    sophomorixprint_cmd(who, config, users=users_to_print)
-
-    return output_response(filename, mtype)
+    return print_response(who, config, filename, mtype, users=users_to_print)

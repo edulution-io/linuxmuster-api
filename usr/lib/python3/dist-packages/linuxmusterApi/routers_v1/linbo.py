@@ -5,6 +5,7 @@ All business logic lives in linuxmusterTools.linbo modules.
 This router only handles HTTP concerns (auth, validation, responses).
 """
 
+import io
 import os.path
 import subprocess
 from datetime import datetime, timezone
@@ -39,6 +40,7 @@ from linuxmusterTools.ldapconnector.checks import valid_schools
 from linuxmusterTools.devices import Devices
 
 from linuxmusterTools.linbo import *
+from linuxmusterTools.linbo.images import timestamp2date
 from linuxmusterTools.linbo.models import ImageInfo
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.common.checks import NameChecker
@@ -1637,6 +1639,29 @@ def duplicate_image(
 
 # TODO: HTTP verb inconsistency — full overwrite (upsert), compare with write_startconf
 # (same kind of operation) which uses POST instead
+def check_image_info_or_400(info):
+    """
+    Refuse a .info which makes the image unreadable, with the rules of
+    LinboImage.parse_info_file(): the last occurrence of a key counts.
+    """
+
+
+    values = {}
+    # Same line ends as reading the file
+    for line in io.StringIO(info, newline=None):
+        if '=' in line:
+            key, value = line.strip().split('=', 1)
+            values[key] = value.strip('"')
+
+    missing = [field for field in ImageInfo.__dataclass_fields__ if not values.get(field)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"info is incomplete, missing: {', '.join(missing)}")
+
+    try:
+        timestamp2date(values['timestamp'])
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"info has an invalid timestamp: {values['timestamp']}")
+
 @router.put("/images/{image_name}/extras", name="Write an image's sidecar files")
 def save_image_extras(
     image_name: str,
@@ -1683,14 +1708,7 @@ def save_image_extras(
     if diff and group.diff_image is None:
         raise HTTPException(status_code=404, detail=f"Image {image_name} has no differential image")
 
-    # An incomplete .info makes the image unreadable
-    keys = {
-        key for key, separator, value in (line.strip().partition('=') for line in body.info.splitlines())
-        if separator and value.strip('"')
-    }
-    missing = [field for field in ImageInfo.__dataclass_fields__ if field not in keys]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"info is incomplete, missing: {', '.join(missing)}")
+    check_image_info_or_400(body.info)
 
     run_linbo_image_operation(
         lambda: manager.save_extras(image_name, body.model_dump(), timestamp=timestamp, diff=diff)
