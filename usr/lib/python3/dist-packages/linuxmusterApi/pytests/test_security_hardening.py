@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 import security.header as header
 from security import AdminOfUserChecker, AuthenticatedUser
-from security import login_failures, revocation
+from security import basic_auth, login_failures, revocation
 from routers_v1 import devices, exam, listmanagement, users, vdi
 from routers_v1.body_schemas import ConnectionRequest, SetCurrentPassword, StopExam
 from utils import checks, sophomorix
@@ -87,6 +87,14 @@ def test_a_revoked_token_is_refused_in_any_spelling(ldap_user):
     for spelling in (revoked, revoked + '=='):
         with pytest.raises(HTTPException):
             header.check_user_header(spelling, SECRET)
+
+
+def test_a_logout_does_not_affect_another_login_in_the_same_second(ldap_user):
+    first, second = (basic_auth.generate_jwt('jdoe', 'teacher', 'CN=jdoe', 'default-school', SECRET) for _ in range(2))
+    revocation.revoke(first, 2**40)
+    with pytest.raises(HTTPException):
+        header.check_user_header(first, SECRET)
+    assert header.check_user_header(second, SECRET)
 
 
 def test_a_job_log_stays_in_the_job_directory(monkeypatch, tmp_path):
