@@ -12,10 +12,9 @@ def who(role='schooladministrator', user='sa', school='abc'):
     return AuthenticatedUser(dn='', user=user, role=role, school=school)
 
 
-@pytest.fixture(autouse=True)
-def job_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(jobs, 'JOB_DIR', str(tmp_path))
-    return tmp_path
+@pytest.fixture
+def job_dir(run_dir):
+    return run_dir
 
 
 def wait(job_id, user=None):
