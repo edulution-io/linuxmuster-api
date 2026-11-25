@@ -16,6 +16,20 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+def job_paths_or_404(pid):
+    """
+    :param pid: Id of a background job
+    :type pid: basestring
+    :return: Path of the log file and of the status file
+    :rtype: tuple
+    """
+
+
+    path = os.path.normpath(os.path.join(JOB_DIR, pid))
+    if not path.startswith(f'{JOB_DIR}/'):
+        raise HTTPException(status_code=404, detail=f"Job {pid} not found.")
+    return f'{path}.sophomorix.log', f'{path}.sophomorix.status'
+
 def new_job_log(prefix):
     """
     Create the log file of a background job.
@@ -237,8 +251,7 @@ def get_status_sophomorix_apply(pid: str, who: AuthenticatedUser = Depends(RoleC
     """
 
 
-    logpath = f"{JOB_DIR}/{pid}.sophomorix.log"
-    statuspath = f"{JOB_DIR}/{pid}.sophomorix.status"
+    logpath, statuspath = job_paths_or_404(pid)
 
     # The id starts with the school of the job
     if who.school != 'global' and not pid.startswith(f'{who.school}.'):
