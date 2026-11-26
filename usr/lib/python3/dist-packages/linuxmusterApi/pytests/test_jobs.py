@@ -192,18 +192,15 @@ def test_expired_jobs_and_files_are_gone_on_direct_requests():
 def test_jobs_and_files_per_user_are_limited(monkeypatch):
     monkeypatch.setattr(jobs, 'MAX_UNFINISHED', 2)
     release = threading.Event()
-    for _ in range(2):
-        jobs.start('x', who(), 'abc', release.wait)
+    started = [jobs.start('x', who(), 'abc', release.wait)['job'] for _ in range(2)]
     with pytest.raises(HTTPException) as error:
         jobs.start('x', who(), 'abc', release.wait)
     assert error.value.status_code == 429
     release.set()
+    for job_id in started:
+        wait(job_id)
 
     monkeypatch.setattr(jobs, 'MAX_FILES', 1)
-    for _ in range(50):
-        if all(job['status'] in jobs.FINISHED for job in jobs.list_jobs(who())):
-            break
-        time.sleep(0.02)
     # A running job counts with the file it will create
     hold = threading.Event()
     first = jobs.start('x', who(), 'abc', lambda: jobs.JobFile(hold.wait() and b'x', 'a.csv', 'text/csv'), with_file=True)['job']
