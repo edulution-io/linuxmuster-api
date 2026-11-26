@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from linuxmusterTools.common.checks import NameChecker
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from linuxmusterTools.ldapconnector.checks import is_valid_school
-from linuxmusterTools.linbo.group_ids import split_linbo_group_id
+from linuxmusterTools.linbo.config import LinboConfigManager
 from linuxmusterTools.linbo import ImageExistsError, IncompleteImageInfoError, LINBO_PATH, timestamp2date
 from linuxmusterTools.passwords import PasswordRules
 
@@ -236,9 +236,10 @@ def check_valid_school_or_404(school):
 def check_linbo_group_access(group_id, who):
     """
     A school-administrator may only address the hardware groups of their own
-    school: the id of a group names its school (``<school>__<group>``, plain
-    for default-school, see linuxmusterTools.linbo.group_ids). A
-    global-administrator may address every group.
+    school, as LinboConfigManager.owner_school() gives them: a qualified id
+    (``<school>__<group>``) belongs to the school in its name, a plain id to
+    the school in the ``School =`` line of its start.conf, else to
+    default-school. A global-administrator may address every group.
 
     :raises HTTPException 403: the group belongs to another school
     """
@@ -246,7 +247,7 @@ def check_linbo_group_access(group_id, who):
     if who.school == 'global':
         return
 
-    if split_linbo_group_id(group_id)[0] != who.school:
+    if LinboConfigManager().owner_school(group_id) != who.school:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 

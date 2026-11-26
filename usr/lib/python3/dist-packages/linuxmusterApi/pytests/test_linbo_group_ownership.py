@@ -36,36 +36,73 @@ def manager_class(monkeypatch):
 # ── check_linbo_group_access ─────────────────────────────────────────────────
 
 
+@pytest.fixture
+def linbo_path(tmp_path, monkeypatch):
+    """An empty /srv/linbo: a plain id has no start.conf naming its school."""
+    import linuxmusterTools.linbo.config as config_module
+
+    monkeypatch.setattr(config_module, "LINBO_PATH", str(tmp_path))
+    return tmp_path
+
+
 @pytest.mark.parametrize("group_id", ["raum101", "abc__raum101", "xyz__raum101", "abc__a__b"])
-def test_global_administrator_may_address_every_group(group_id):
+def test_global_administrator_may_address_every_group(linbo_path, group_id):
     check_linbo_group_access(group_id, GLOBAL_ADMIN)
 
 
 @pytest.mark.parametrize("group_id", ["abc__raum101", "abc__win11_edu", "abc___x", "abc__a__b"])
-def test_school_administrator_may_address_the_groups_of_their_school(group_id):
+def test_school_administrator_may_address_the_groups_of_their_school(linbo_path, group_id):
     check_linbo_group_access(group_id, ABC_ADMIN)
 
 
 @pytest.mark.parametrize("group_id", ["raum101", "xyz__raum101", "ab__raum101", "abcd__raum101", "abc"])
-def test_school_administrator_may_not_address_other_groups(group_id):
+def test_school_administrator_may_not_address_other_groups(linbo_path, group_id):
     with pytest.raises(HTTPException) as error:
         check_linbo_group_access(group_id, ABC_ADMIN)
     assert error.value.status_code == 403
 
 
-def test_default_school_administrator_owns_the_plain_groups_only():
+def test_default_school_administrator_owns_the_plain_groups_only(linbo_path):
     check_linbo_group_access("raum101", DEFAULT_ADMIN)
     with pytest.raises(HTTPException) as error:
         check_linbo_group_access("abc__raum101", DEFAULT_ADMIN)
     assert error.value.status_code == 403
 
 
-def test_a_user_without_school_gets_no_group():
+def test_a_user_without_school_gets_no_group(linbo_path):
     nobody = AuthenticatedUser(dn="", user="nobody", role="schooladministrator", school=None)
     for group_id in ("raum101", "abc__raum101"):
         with pytest.raises(HTTPException) as error:
             check_linbo_group_access(group_id, nobody)
         assert error.value.status_code == 403
+
+
+def test_a_plain_group_belongs_to_the_school_in_its_startconf(linbo_path):
+    (linbo_path / "start.conf.win11").write_text("[LINBO]\nServer = 10.0.0.1\nSchool = abc\nGroup = win11\n")
+    check_linbo_group_access("win11", ABC_ADMIN)
+    check_linbo_group_access("win11", GLOBAL_ADMIN)
+    with pytest.raises(HTTPException) as error:
+        check_linbo_group_access("win11", DEFAULT_ADMIN)
+    assert error.value.status_code == 403
+
+
+def test_a_plain_group_without_school_line_belongs_to_default_school(linbo_path):
+    (linbo_path / "start.conf.win11").write_text("[LINBO]\nServer = 10.0.0.1\nGroup = win11\n")
+    check_linbo_group_access("win11", DEFAULT_ADMIN)
+    with pytest.raises(HTTPException) as error:
+        check_linbo_group_access("win11", ABC_ADMIN)
+    assert error.value.status_code == 403
+
+
+def test_a_plain_group_is_listed_and_addressable_by_the_same_school(linbo_path):
+    from linuxmusterTools.linbo.config import LinboConfigManager
+
+    (linbo_path / "start.conf.win11").write_text("[LINBO]\nSchool = abc\nGroup = win11\n")
+    assert "win11" in LinboConfigManager(school="abc").group_ids
+    check_linbo_group_access("win11", ABC_ADMIN)
+    assert "win11" not in LinboConfigManager(school="default-school").group_ids
+    with pytest.raises(HTTPException):
+        check_linbo_group_access("win11", DEFAULT_ADMIN)
 
 
 # ── the manager is scoped to the school of the user ─────────────────────────
