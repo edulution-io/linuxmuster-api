@@ -81,8 +81,11 @@ def delete_account_job(request, who, account_type, name):
     if name.lower() == who.user.lower():
         raise HTTPException(status_code=400, detail="You can not delete your own account.")
 
+    # e.g. the bind user an installation logs in with
+    protected = request.app.state.accounts.get('protected', []) or []
+
     try:
-        check_deletable(account_type, name)
+        check_deletable(account_type, name, protected)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except AccountNotFoundError as error:
@@ -90,7 +93,7 @@ def delete_account_job(request, who, account_type, name):
 
     def delete():
         try:
-            delete_account(account_type, name)
+            delete_account(account_type, name, protected)
         except (AccountError, ValueError) as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
 

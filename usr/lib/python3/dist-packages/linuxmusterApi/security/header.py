@@ -19,6 +19,8 @@ class AuthenticatedUser(BaseModel):
     user: str
     role: str | None = None
     school: str | None = None
+    # objectGUID: unlike the name, it is never given to another account
+    guid: str | None = None
 
 
 X_API_KEY = APIKeyHeader(name='X-API-Key')
@@ -97,13 +99,14 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
             detail="Invalid API Key",
         )
 
-    check_session(user_details['distinguishedName'], payload)
+    state = check_session(user_details['distinguishedName'], payload)
 
     return AuthenticatedUser(
         dn=user_details['distinguishedName'],
         user=user,
         role=user_details['sophomorixRole'],
-        school=user_details.get('sophomorixSchoolname', "")
+        school=user_details.get('sophomorixSchoolname', ""),
+        guid=state.get('guid'),
     )
 
 
@@ -117,6 +120,8 @@ def check_session(dn, payload):
     :param payload: Claims of the token. Without pwd it was issued by an older
         version and stays valid until it expires.
     :type payload: dict
+    :return: State of the account, see get_account_state()
+    :rtype: dict
     """
 
     state = get_account_state(dn)
@@ -130,6 +135,8 @@ def check_session(dn, payload):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key",
         )
+
+    return state
 
 
 def check_host_header(hostkey, client_ip, keys, host_key_auth_enable, method, path) -> AuthenticatedUser:

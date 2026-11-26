@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     app.state.notifications = config.get('notifications', {})
     app.state.rate_limit = config.get('rate_limit', {}) or {}
     app.state.security = config.get('security', {}) or {}
+    app.state.accounts = config.get('accounts', {}) or {}
     mark_interrupted()
     _report_unreachable_host_key_scopes()
     _report_invalid_rate_limit_whitelist()

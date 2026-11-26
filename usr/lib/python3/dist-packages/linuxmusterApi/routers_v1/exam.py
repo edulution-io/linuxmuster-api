@@ -59,6 +59,17 @@ def start_exam_mode(userlist: UserList, request: Request, response: Response, ba
 
     return jobs.run_or_start(background, response, request, 'exam-start', who, who.school, start)
 
+def check_exam_owner(who, users):
+    """
+    :raises HTTPException 403: a teacher stops the exam of another teacher
+    """
+
+    if who.role == 'teacher':
+        for user in users:
+            examteacher = lr.getval(f"/users/exam/{user.removesuffix('-exam')}", 'examTeacher')
+            if examteacher and examteacher != who.user:
+                raise HTTPException(status_code=403, detail=f"The exam of {user} was started by another teacher.")
+
 @router.post("/stop", name="Stop exam")
 def stop_exam_mode(stopexam: StopExam, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(UserListChecker("GST"))):
     """
@@ -93,11 +104,7 @@ def stop_exam_mode(stopexam: StopExam, request: Request, response: Response, bac
         # Nothing to do
         raise HTTPException(status_code=400, detail=f"Missing userlist of members to handle")
 
-    if who.role == 'teacher':
-        for user in stopexam.users:
-            examteacher = lr.getval(f"/users/exam/{user.removesuffix('-exam')}", 'examTeacher')
-            if examteacher and examteacher != who.user:
-                raise HTTPException(status_code=403, detail=f"The exam of {user} was started by another teacher.")
+    check_exam_owner(who, stopexam.users)
 
     if stopexam.target:
         target = stopexam.target
@@ -111,6 +118,8 @@ def stop_exam_mode(stopexam: StopExam, request: Request, response: Response, bac
     target = re.sub(r'[^A-Za-z0-9_-]', '_', target)
 
     def stop():
+        # Again, a queued job may run when the exam was started by somebody else
+        check_exam_owner(who, stopexam.users)
         try:
             # Since the cn of the users are given and uniq across schools, no need to specify the school
             sophomorixCommand = [

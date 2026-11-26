@@ -169,6 +169,17 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     logpath = f"{JOB_DIR}/{pid}.sophomorix.log"
 
     jobs.set_running(pid)
+    try:
+        _process_user(cmd, pid, statuspath, logpath, command, school, caller, notifications_config)
+    except Exception as error:
+        # The job must not stay running
+        logging.exception(f"Job {pid} failed")
+        with open(statuspath, 'w') as status:
+            status.write(f"Process {pid} failed: {type(error).__name__}")
+        jobs.finish(pid, error={'status': 500, 'detail': f'{type(error).__name__}: {error}'})
+
+
+def _process_user(cmd, pid, statuspath, logpath, command, school, caller, notifications_config):
     start = datetime.now().strftime("%d %b %Y %H:%M:%S")
     with open(statuspath, 'w') as status:
         status.write(f"Process {pid} was started at {start} and is still running.")

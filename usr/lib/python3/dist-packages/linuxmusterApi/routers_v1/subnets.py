@@ -5,7 +5,7 @@ from security import RoleChecker, AuthenticatedUser
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.subnets import Subnets, import_subnets, SUBNETS_PATH
 from utils import jobs
-from utils.csvfiles import check_rows_or_400, etag, unchanged_or_412
+from utils.csvfiles import check_rows_or_400, etag, read_with_etag, unchanged_or_412
 from .body_schemas import SubnetList
 
 router = APIRouter(
@@ -36,13 +36,7 @@ def get_subnets(response: Response, who: AuthenticatedUser = Depends(RoleChecker
     """
 
 
-    response.headers['ETag'] = etag(SUBNETS_PATH)
-
-    if not os.path.isfile(SUBNETS_PATH):
-        return []
-
-    with LMNFile(SUBNETS_PATH, 'r') as f:
-        return f.read()
+    return read_with_etag(SUBNETS_PATH, response)
 
 @router.post("/", name="Write content of subnets.csv")
 def post_subnets(content: SubnetList, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("G"))):
@@ -75,7 +69,7 @@ def post_subnets(content: SubnetList, response: Response, if_match: str | None =
         raise HTTPException(status_code=400, detail="Missing data: the server needs at least one subnet.")
 
     rows = [{key: value or '' for key, value in subnet.model_dump().items()} for subnet in content.data]
-    check_rows_or_400(rows)
+    check_rows_or_400(rows, ['network'])
 
     report = Subnets.check_rows(rows)
     if report:
@@ -134,7 +128,8 @@ def do_import_subnets(who: AuthenticatedUser = Depends(RoleChecker("G"))):
     """
 
 
-    return import_subnets()
+    with jobs.serial_lock('import'):
+        return import_subnets()
 
 @router.post("/import-subnets", status_code=202, name="Run linuxmuster-import-subnets in a job")
 def start_import_subnets(request: Request, who: AuthenticatedUser = Depends(RoleChecker("G"))):

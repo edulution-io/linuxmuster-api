@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -52,18 +53,36 @@ def test_errors_keep_their_status():
     assert wait(jobs.start('x', who(), 'abc', crash)['job'])['error']['status'] == 500
 
 
-def test_serial_jobs_do_not_overlap():
-    running, overlaps = [], []
+def test_one_job_of_a_kind_and_the_others_go_on():
+    release = threading.Event()
+    first = jobs.start('x', who(), 'abc', release.wait, serial='import')['job']
+    with pytest.raises(HTTPException) as error:
+        jobs.start('x', who(user='sa2'), 'abc', lambda: 1, serial='import')
+    assert error.value.status_code == 409 and error.value.detail['job'] == first
+    # Unrelated jobs do not wait for it
+    assert wait(jobs.start('y', who(), 'abc', lambda: 2)['job'])['result'] == 2
+    release.set()
+    wait(first)
+    assert wait(jobs.start('x', who(), 'abc', lambda: 3, serial='import')['job'])['result'] == 3
 
-    def work():
-        overlaps.append(len(running))
-        running.append(1)
-        time.sleep(0.05)
-        running.pop()
 
-    for job_id in [jobs.start('x', who(), 'abc', work, serial='import')['job'] for _ in range(4)]:
-        wait(job_id)
-    assert overlaps == [0, 0, 0, 0]
+def test_a_direct_call_waits_for_a_job_of_its_kind():
+    order, release = [], threading.Event()
+
+    def job():
+        order.append('job')
+        release.wait()
+
+    job_id = jobs.start('x', who(), 'abc', job, serial='import')['job']
+    while jobs.get_or_404(job_id, who())['status'] != 'running':
+        time.sleep(0.01)
+    direct = threading.Thread(target=jobs.run_or_start, args=(False, None, None, 'x', who(), 'abc', lambda: order.append('direct')), kwargs={'serial': 'import'})
+    direct.start()
+    time.sleep(0.1)
+    assert order == ['job']
+    release.set()
+    direct.join()
+    assert order == ['job', 'direct']
 
 
 def test_file():
@@ -83,8 +102,58 @@ def test_unfinished_jobs(job_dir):
     with pytest.raises(HTTPException) as error:
         jobs.delete_or_409(job_id, who())
     assert error.value.status_code == 409
+    # The process of the job still runs
+    jobs.mark_interrupted()
+    assert jobs.get_or_404(job_id, who())['status'] == 'queued'
+    jobs._update(job_id, process='999999999:1')
     jobs.mark_interrupted()
     assert jobs.get_or_404(job_id, who())['status'] == 'failed'
+
+
+def test_only_the_caller_and_global_administrators_delete_a_job():
+    job_id = wait(jobs.start('create-schooladministrator', who('globaladministrator', 'ga', 'global'), 'abc', lambda: {'password': 'x'})['job'])['id']
+    for other in (who(), who('teacher', 'lehmann')):
+        with pytest.raises(HTTPException) as error:
+            jobs.delete_or_409(job_id, other)
+        assert error.value.status_code in (403, 404)
+    jobs.delete_or_409(job_id, who('globaladministrator', 'ga2', 'global'))
+
+
+def test_a_new_account_with_the_same_name_is_not_the_owner():
+    old = who()
+    old.guid = 'aa'
+    job_id = wait(jobs.start('x', old, 'abc', lambda: {'password': 'x'})['job'])['id']
+    new = who()
+    new.guid = 'bb'
+    assert jobs.public(jobs.get_or_404(job_id, new), new)['result'] is None
+    assert jobs.public(jobs.get_or_404(job_id, old), old)['result'] == {'password': 'x'}
+
+
+def test_expired_jobs_and_files_are_gone_on_direct_requests():
+    job_id = wait(jobs.start('x', who(), 'abc', lambda: jobs.JobFile(b'x', 'a.csv', 'text/csv'))['job'])['id']
+    jobs._update(job_id, finishedTime=time.time() - jobs.FILE_RETENTION - 1)
+    with pytest.raises(HTTPException):
+        jobs.file_or_404(job_id, who())
+    jobs._update(job_id, finishedTime=time.time() - jobs.RETENTION - 1)
+    with pytest.raises(HTTPException):
+        jobs.get_or_404(job_id, who())
+
+
+def test_jobs_and_files_per_user_are_limited(monkeypatch):
+    monkeypatch.setattr(jobs, 'MAX_UNFINISHED', 2)
+    release = threading.Event()
+    for _ in range(2):
+        jobs.start('x', who(), 'abc', release.wait)
+    with pytest.raises(HTTPException) as error:
+        jobs.start('x', who(), 'abc', release.wait)
+    assert error.value.status_code == 429
+    release.set()
+
+    monkeypatch.setattr(jobs, 'MAX_FILES', 1)
+    wait(jobs.start('x', who(), 'abc', lambda: jobs.JobFile(b'x', 'a.csv', 'text/csv'))['job'])
+    with pytest.raises(HTTPException) as error:
+        jobs.check_file_quota(who())
+    assert error.value.status_code == 429
 
 
 def test_old_jobs_are_forgotten(monkeypatch):
@@ -117,7 +186,7 @@ def test_if_match(tmp_path):
         pass
 
 
-@pytest.mark.parametrize('rows', [None, [{'a': 'x;y'}], [{'a': 'x\ny'}], [{'a': '"x"'}], ['x']])
+@pytest.mark.parametrize('rows', [None, [{'a': 'x;y'}], [{'a': 'x\ny'}], [{'a': '"x"'}], ['x'], [{'a': ['x;y']}], [{'a': {'b': 1}}]])
 def test_refused_rows(rows):
     with pytest.raises(HTTPException):
         check_rows_or_400(rows)
@@ -126,3 +195,11 @@ def test_refused_rows(rows):
 def test_accepted_rows():
     check_rows_or_400([])
     check_rows_or_400([{'a': '# a;b "c"', 'b': None}, {'a': 'x', 'b': 1}])
+
+
+def test_a_comment_is_recognised_by_the_first_column():
+    # The writer only writes the first column of a comment, the others must be valid
+    with pytest.raises(HTTPException):
+        check_rows_or_400([{'b': '# x', 'a': 'y;z'}], ['a', 'b'])
+    check_rows_or_400([{'b': 'x', 'a': '# y;z'}], ['a', 'b'])
+

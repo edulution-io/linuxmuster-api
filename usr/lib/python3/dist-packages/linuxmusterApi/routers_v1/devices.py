@@ -10,7 +10,7 @@ from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.samba_util import DeviceManager
 from utils.checks import get_printer_or_404
 from utils import jobs
-from utils.csvfiles import check_rows_or_400, etag, unchanged_or_412
+from utils.csvfiles import check_rows_or_400, etag, fieldnames, read_with_etag, unchanged_or_412
 from utils.sophomorix import lmn_getSophomorixValue
 from .body_schemas import MgmtList, Device
 from utils.checks import check_valid_school_or_404, require_school
@@ -47,13 +47,9 @@ def get_all_devices(school: str, response: Response, who: AuthenticatedUser = De
         prefix = ''
 
     devices_path = f'/etc/linuxmuster/sophomorix/{school}/{prefix}devices.csv'
-    response.headers['ETag'] = etag(devices_path)
-
-    if not os.path.isfile(devices_path):
+    devices_data = read_with_etag(devices_path, response)
+    if not devices_data:
         return []
-
-    with LMNFile(devices_path, 'r') as f:
-        devices_data = f.read()
 
     ldap_data = lr.get('/devices', attributes=['cn', 'sophomorixComputerMAC', 'dn'])
 
@@ -239,7 +235,7 @@ def post_management_list_content(school: str, content: MgmtList, response: Respo
 
     path = f"/etc/linuxmuster/sophomorix/{school}/{prefix}devices.csv"
 
-    check_rows_or_400(content.data)
+    check_rows_or_400(content.data, fieldnames(path))
 
     # Filter status key if given
     for d in content.data:

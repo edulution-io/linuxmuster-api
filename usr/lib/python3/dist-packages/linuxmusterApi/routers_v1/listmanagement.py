@@ -6,7 +6,7 @@ from security import RoleChecker, AuthenticatedUser
 from utils.checks import get_mgmtlist_path_or_404, check_valid_school_or_404, check_tmp_dir, require_school, JOB_DIR
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
-from utils.csvfiles import check_rows_or_400, etag, unchanged_or_412
+from utils.csvfiles import check_rows_or_400, etag, fieldnames, read_with_etag, unchanged_or_412
 from utils import jobs
 from utils.sophomorix import process_user
 from .body_schemas import MgmtList
@@ -80,11 +80,8 @@ def get_management_list_content(school: str, mgmtlist: str, response: Response, 
 
     path = get_mgmtlist_path_or_404(mgmtlist, school)
 
-    response.headers['ETag'] = etag(path)
-
     try:
-        with LMNFile(path, 'r') as list:
-            return list.read()
+        return read_with_etag(path, response)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading {path}: {str(e)}")
 
@@ -121,7 +118,7 @@ def post_management_list_content(school: str, mgmtlist: str, content: MgmtList, 
 
     path = get_mgmtlist_path_or_404(mgmtlist, school)
 
-    check_rows_or_400(content.data)
+    check_rows_or_400(content.data, fieldnames(path))
 
     with unchanged_or_412(path, if_match):
         try:

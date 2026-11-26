@@ -72,6 +72,7 @@ def print_or_start(background, request, response, who, school, config, filename,
 
 
     if background:
+        jobs.check_file_quota(who)
         return jobs.run_or_start(
             True, response, request, 'print-passwords', who, school,
             lambda: jobs.JobFile(print_file(who, config, filename, **selection), filename, mtype),

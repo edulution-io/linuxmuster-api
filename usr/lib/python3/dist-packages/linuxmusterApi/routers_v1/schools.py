@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from security import RoleChecker, AuthenticatedUser
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from linuxmusterTools.lmnconfig import (
     CUSTOM_FIELD_ROLES,
+    ConfigChangedError,
     CustomFieldsConfig,
     SchoolSettings,
     SchoolSettingsError,
@@ -21,6 +22,13 @@ router = APIRouter(
 )
 
 CUSTOM_FIELD_NUMBERS = ('1', '2', '3', '4', '5')
+
+def _etag(if_match):
+    """
+    :return: The ETag a change is based on, None to write in any case
+    """
+
+    return None if if_match in (None, '*') else if_match.strip()
 
 def _custom_fields(school):
     default = {'title': '', 'show': False, 'editable': False}
@@ -91,7 +99,7 @@ def get_school(school: str, who: AuthenticatedUser = Depends(RoleChecker("G"))):
 
 @router.get("/{school}/settings", name="Read the settings of a school")
 @require_school
-def get_school_settings(school: str, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def get_school_settings(school: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Read all settings of a school (school.conf).
 
@@ -118,16 +126,18 @@ def get_school_settings(school: str, who: AuthenticatedUser = Depends(RoleChecke
 
 
     school_settings = SchoolSettings(school)
+    response.headers['ETag'] = school_settings.etag()
     return {"settings": school_settings.read(), "schema": school_settings.schema}
 
 @router.patch("/{school}/settings", name="Change settings of a school")
 @require_school
-def patch_school_settings(school: str, body: SchoolSettingsBody, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def patch_school_settings(school: str, body: SchoolSettingsBody, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Change some settings of a school (school.conf).
 
     Settings left out are not changed, and nothing is written if one of them is
-    refused. Example:
+    refused. With an `If-Match` header (the `ETag` of the GET), it is refused
+    with 412 if school.conf was changed in the meantime. Example:
 
     {"settings": {"school": {"PRINTSERVER": "print01"}, "role.student": {"QUOTA_DEFAULT_SCHOOL": 2000}}}
 
@@ -150,13 +160,17 @@ def patch_school_settings(school: str, body: SchoolSettingsBody, who: Authentica
     """
 
 
+    school_settings = SchoolSettings(school)
     try:
-        settings = SchoolSettings(school).update(
-            body.settings, allow_restricted=who.role == 'globaladministrator'
+        settings = school_settings.update(
+            body.settings, allow_restricted=who.role == 'globaladministrator', etag=_etag(if_match),
         )
     except SchoolSettingsError as error:
         raise HTTPException(status_code=400, detail=error.errors) from error
+    except ConfigChangedError as error:
+        raise HTTPException(status_code=412, detail="school.conf was changed in the meantime, please read it again.") from error
 
+    response.headers['ETag'] = school_settings.etag()
     return {"settings": settings}
 
 @router.post("/{school}/quotas/apply", status_code=202, name="Apply the quotas of all users of a school")
@@ -192,7 +206,7 @@ def apply_school_quotas(
 
 @router.get("/{school}/custom-fields", name="Read the settings of the custom fields")
 @require_school
-def get_custom_fields(school: str, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def get_custom_fields(school: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Read how the custom fields of the users of a school are displayed.
 
@@ -214,15 +228,18 @@ def get_custom_fields(school: str, who: AuthenticatedUser = Depends(RoleChecker(
     """
 
 
+    response.headers['ETag'] = CustomFieldsConfig.etag(school)
     return _custom_fields(school)
 
 @router.patch("/{school}/custom-fields", name="Change the settings of the custom fields")
 @require_school
-def patch_custom_fields(school: str, body: CustomFieldsBody, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def patch_custom_fields(school: str, body: CustomFieldsBody, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Change how the custom fields of the users of a school are displayed.
 
-    What is left out is not changed. Example:
+    What is left out is not changed. With an `If-Match` header (the `ETag` of
+    the GET), it is refused with 412 if the file was changed in the meantime.
+    Example:
 
     {"custom": {"students": {"1": {"title": "Locker", "show": true, "editable": false}}}}
 
@@ -253,7 +270,10 @@ def patch_custom_fields(school: str, body: CustomFieldsBody, who: AuthenticatedU
                     if index not in CUSTOM_FIELD_NUMBERS:
                         raise HTTPException(status_code=400, detail=f"Unknown field {index}, allowed are 1 to 5")
 
-    if changes:
-        CustomFieldsConfig.update(school, changes)
+    try:
+        CustomFieldsConfig.update(school, changes, etag=_etag(if_match))
+    except ConfigChangedError as error:
+        raise HTTPException(status_code=412, detail="custom_fields.yml was changed in the meantime, please read it again.") from error
 
+    response.headers['ETag'] = CustomFieldsConfig.etag(school)
     return _custom_fields(school)
