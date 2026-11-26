@@ -278,6 +278,31 @@ def finish(job_id, result=None, error=None, file=None):
     )
 
 
+def fail(job_id, error):
+    """
+    Mark a job as failed when it went wrong outside of its function. If not
+    even that can be written, e.g. because /run is full, the job is removed:
+    a job which stays queued or running blocks every further job of its kind.
+
+    :param error: Error of the job, see finish()
+    :return: False if the job was already finished
+    :rtype: bool
+    """
+
+    try:
+        job = _read(job_id)
+        if job is not None and job['status'] in FINISHED:
+            return False
+        finish(job_id, error=error)
+    except Exception:
+        logger.exception('Job %s could not be marked as failed, it is removed', job_id)
+        try:
+            _delete(job_id)
+        except OSError:
+            logger.exception('Job %s could not be removed', job_id)
+    return True
+
+
 def start(job_type, who, school, function, serial=None, notifications_config=None):
     """
     Run a function as a job.
@@ -293,12 +318,20 @@ def start(job_type, who, school, function, serial=None, notifications_config=Non
     job_id = create(job_type, who, school, serial=serial)
 
     def run():
-        set_running(job_id)
-        if serial:
-            with serial_lock(serial):
+        # Nothing may escape: the executor would swallow it and the job would
+        # stay queued or running
+        try:
+            if serial:
+                with serial_lock(serial):
+                    # Only now, a direct call may still hold the lock
+                    set_running(job_id)
+                    _run(job_id, job_type, who, school, function, notifications_config)
+            else:
+                set_running(job_id)
                 _run(job_id, job_type, who, school, function, notifications_config)
-        else:
-            _run(job_id, job_type, who, school, function, notifications_config)
+        except Exception as error:
+            logger.exception('Job %s (%s) could not be run', job_id, job_type)
+            fail(job_id, {'status': 500, 'detail': f'{type(error).__name__}: {error}'})
 
     _executor.submit(run)
     return {'job': job_id}

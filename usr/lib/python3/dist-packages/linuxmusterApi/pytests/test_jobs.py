@@ -85,6 +85,31 @@ def test_a_direct_call_waits_for_a_job_of_its_kind():
     assert order == ['job', 'direct']
 
 
+def test_a_job_which_cannot_be_finished_does_not_block_its_kind(monkeypatch):
+    finish = jobs.finish
+
+    def full(*args, **kwargs):
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(jobs, 'finish', full)
+    job_id = jobs.start('x', who(), 'abc', lambda: 1, serial='import')['job']
+    for _ in range(200):
+        if jobs._read(job_id) is None:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError('the job was not removed')
+    monkeypatch.setattr(jobs, 'finish', finish)
+    assert wait(jobs.start('x', who(), 'abc', lambda: 2, serial='import')['job'])['result'] == 2
+
+
+def test_a_finished_job_is_not_failed_afterwards():
+    job_id = jobs.create('x', who(), 'abc')
+    jobs.finish(job_id, result=1)
+    assert jobs.fail(job_id, {'status': 500, 'detail': 'late'}) is False
+    assert wait(job_id)['result'] == 1
+
+
 def test_file():
     job_id = jobs.start('x', who(), 'abc', lambda: jobs.JobFile(b'%PDF', 'a.pdf', 'application/pdf'))['job']
     assert wait(job_id)['file'] == 'a.pdf'
