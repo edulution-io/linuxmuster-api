@@ -111,7 +111,11 @@ def sophomorixprint_cmd(who, config, schoolclasses=[], users=[]):
     else:
         raise HTTPException(status_code=400, detail=f"This group does not contain users whose passwords can be printed out.")
 
-    if config.pdflatex:
+    if config.format == 'csv':
+        # The csv files are written before LaTeX runs: a failed PDF must not
+        # fail a csv export. An older sophomorix-print skips the PDF as well.
+        cmd.extend(['--command', 'none'])
+    elif config.pdflatex:
         cmd.extend(['--command', 'pdflatex'])
 
     if config.one_per_page:

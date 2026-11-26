@@ -164,19 +164,23 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     :type notifications_config: dict
     """
 
-    check_tmp_dir()
     statuspath = f"{JOB_DIR}/{pid}.sophomorix.status"
     logpath = f"{JOB_DIR}/{pid}.sophomorix.log"
 
-    jobs.set_running(pid)
     try:
+        check_tmp_dir()
+        jobs.set_running(pid)
         _process_user(cmd, pid, statuspath, logpath, command, school, caller, notifications_config)
     except Exception as error:
-        # The job must not stay running
         logging.exception(f"Job {pid} failed")
-        with open(statuspath, 'w') as status:
-            status.write(f"Process {pid} failed: {type(error).__name__}")
-        jobs.finish(pid, error={'status': 500, 'detail': f'{type(error).__name__}: {error}'})
+        # The job first: it must not stay running, even if the status file
+        # cannot be written either
+        if jobs.fail(pid, {'status': 500, 'detail': f'{type(error).__name__}: {error}'}):
+            try:
+                with open(statuspath, 'w') as status:
+                    status.write(f"Process {pid} failed: {type(error).__name__}")
+            except OSError:
+                logging.exception(f"Status of job {pid} could not be written")
 
 
 def _process_user(cmd, pid, statuspath, logpath, command, school, caller, notifications_config):

@@ -47,3 +47,15 @@ def test_parallel_prints_of_one_caller_do_not_mix(print_dir, monkeypatch):
     for thread in threads:
         thread.join()
     assert results == {'a': b'a', 'b': b'b', 'c': b'c'}
+
+
+@pytest.mark.parametrize('fmt, pdflatex, command', [
+    ('csv', True, ['--command', 'none']),
+    ('pdf', True, ['--command', 'pdflatex']),
+])
+def test_a_csv_export_does_not_run_latex(monkeypatch, fmt, pdflatex, command):
+    calls = []
+    monkeypatch.setattr(print_passwords.subprocess, 'check_call', lambda cmd, **kwargs: calls.append(cmd))
+    config = SimpleNamespace(format=fmt, pdflatex=pdflatex, one_per_page=False, nosplit_names=False, school='')
+    print_passwords.sophomorixprint_cmd(WHO, config, users=['max'])
+    assert calls[0][-2:] == command

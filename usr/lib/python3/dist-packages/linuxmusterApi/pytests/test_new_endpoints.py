@@ -161,3 +161,11 @@ def test_a_sophomorix_job_does_not_stay_running(monkeypatch, run_dir):
     monkeypatch.setattr(sophomorix, 'JOB_DIR', str(run_dir))
     sophomorix.process_user('true', 'abc.check.x', command='sophomorix-check', school='abc')
     assert jobs.get_or_404('abc.check.x', who())['status'] == 'failed'
+
+
+def test_a_sophomorix_job_fails_when_its_status_cannot_be_written(monkeypatch, run_dir):
+    jobs.create('sophomorix-check', who(), 'abc', job_id='abc.check.y')
+    # Like a full /run: no status file can be created
+    monkeypatch.setattr(sophomorix, 'JOB_DIR', str(run_dir / 'missing'))
+    sophomorix.process_user('true', 'abc.check.y', command='sophomorix-check', school='abc')
+    assert jobs.get_or_404('abc.check.y', who())['status'] == 'failed'
