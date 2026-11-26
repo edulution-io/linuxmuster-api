@@ -1,7 +1,7 @@
 import configparser
 import os
 import subprocess
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from security import RoleChecker, AuthenticatedUser
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr, LMNDevice
@@ -9,6 +9,8 @@ from linuxmusterTools.lmnconfig import SophomorixIni
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.samba_util import DeviceManager
 from utils.checks import get_printer_or_404
+from utils import jobs
+from utils.csvfiles import check_rows_or_400, etag, fieldnames, read_with_etag, unchanged_or_412
 from utils.sophomorix import lmn_getSophomorixValue
 from .body_schemas import MgmtList, Device
 from utils.checks import check_valid_school_or_404, require_school
@@ -21,7 +23,7 @@ router = APIRouter(
 
 @router.get("/list/{school}", name="List all devices")
 @require_school
-def get_all_devices(school: str, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def get_all_devices(school: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## List all devices from devices.csv with all available information.
 
@@ -45,11 +47,9 @@ def get_all_devices(school: str, who: AuthenticatedUser = Depends(RoleChecker("G
         prefix = ''
 
     devices_path = f'/etc/linuxmuster/sophomorix/{school}/{prefix}devices.csv'
-    if not os.path.isfile(devices_path):
+    devices_data = read_with_etag(devices_path, response)
+    if not devices_data:
         return []
-
-    with LMNFile(devices_path, 'r') as f:
-        devices_data = f.read()
 
     ldap_data = lr.get('/devices', attributes=['cn', 'sophomorixComputerMAC', 'dn'])
 
@@ -201,12 +201,16 @@ def modify_device(device: str, device_details: Device, who: AuthenticatedUser = 
 
 @router.post("/list/{school}", name="Write content of devices.csv")
 @require_school
-def post_management_list_content(school: str, content: MgmtList, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def post_management_list_content(school: str, content: MgmtList, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Write the content of devices list (file like /etc/linuxmuster/sophomorix/default-school/devices.csv).
     The school must be extra given, because it's not possible to know which school a global-administrator would like
     to request. This will overwrite the content of the CSV file, but LMNFile automatically makes a backup of the old
     CSV file.
+
+    Values must not contain `;`, `"` or line breaks. With an `If-Match` header
+    (the `ETag` of the GET), it is refused with 412 if the file was changed in
+    the meantime.
 
     ### Access
     - global-administrators
@@ -231,24 +235,33 @@ def post_management_list_content(school: str, content: MgmtList, who: Authentica
 
     path = f"/etc/linuxmuster/sophomorix/{school}/{prefix}devices.csv"
 
+    check_rows_or_400(content.data, fieldnames(path))
+
     # Filter status key if given
     for d in content.data:
         if 'status' in d:
             del d['status']
 
-    try:
-        with LMNFile(path, 'w') as devices_file:
-            return devices_file.write(content.data)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error writing {path}: {str(e)}")
+    with unchanged_or_412(path, if_match):
+        try:
+            with LMNFile(path, 'w') as devices_file:
+                devices_file.write(content.data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Error writing {path}: {str(e)}")
+        response.headers['ETag'] = etag(path)
 
 @router.get("/list/{school}/import-devices", name="Run linuxmuster-import-devices")
 @require_school
-def do_import_devices(school: str, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def do_import_devices(school: str, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Run linuxmuster-import-devices on the given school.
     The school must be extra given, because it's not possible to know which
     school a global-administrator would like to request.
+
+    With `background=true` it returns the id of a job, see `GET /jobs/{job}`.
+
+    One import runs at a time (devices or subnets): while another one runs,
+    the answer is 409 with the id of its job.
 
     ### Access
     - global-administrators
@@ -262,7 +275,12 @@ def do_import_devices(school: str, who: AuthenticatedUser = Depends(RoleChecker(
     """
 
 
-    cmd = ['linuxmuster-import-devices', '--school', school]
-    results = subprocess.run(cmd, stdout=subprocess.PIPE)
+    def run():
+        cmd = ['linuxmuster-import-devices', '--school', school]
+        results = subprocess.run(cmd, stdout=subprocess.PIPE)
+        output = results.stdout.decode(errors='replace')
+        if background and results.returncode != 0:
+            raise HTTPException(status_code=500, detail=output[-2000:])
+        return output
 
-    return results.stdout.decode()
+    return jobs.run_or_start(background, response, request, 'import-devices', who, school, run, serial='import')

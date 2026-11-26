@@ -1,11 +1,13 @@
 import os
 import tempfile
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, BackgroundTasks, Request, Response
 
 from security import RoleChecker, AuthenticatedUser
 from utils.checks import get_mgmtlist_path_or_404, check_valid_school_or_404, check_tmp_dir, require_school, JOB_DIR
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
+from utils.csvfiles import check_rows_or_400, etag, fieldnames, read_with_etag, unchanged_or_412
+from utils import jobs
 from utils.sophomorix import process_user
 from .body_schemas import MgmtList
 
@@ -52,9 +54,21 @@ def new_job_log(prefix):
     os.close(handle)
     return logpath, os.path.basename(logpath).removesuffix('.sophomorix.log')
 
+def create_job_or_remove_log(job_type, who, school, pid, logpath):
+    """
+    Register the job of a log created by new_job_log(), the log is removed if
+    the job is refused (e.g. 429).
+    """
+
+    try:
+        jobs.create(job_type, who, school, job_id=pid)
+    except Exception:
+        os.unlink(logpath)
+        raise
+
 @router.get("/{school}/{mgmtlist}", name="Get the content of a specific management list")
 @require_school
-def get_management_list_content(school: str, mgmtlist: str, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def get_management_list_content(school: str, mgmtlist: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Get the content of a management list (file like /etc/linuxmuster/sophomorix/default-school/teachers.csv).
     The school must be extra given, because it's not possible to know which school a global-administrator would like
@@ -79,19 +93,22 @@ def get_management_list_content(school: str, mgmtlist: str, who: AuthenticatedUs
     path = get_mgmtlist_path_or_404(mgmtlist, school)
 
     try:
-        with LMNFile(path, 'r') as list:
-            return list.read()
+        return read_with_etag(path, response)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading {path}: {str(e)}")
 
 @router.post("/{school}/{mgmtlist}", name="Write content of a specific management list")
 @require_school
-def post_management_list_content(school: str, mgmtlist: str, content: MgmtList, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+def post_management_list_content(school: str, mgmtlist: str, content: MgmtList, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
     """
     ## Write the content of a management list (file like /etc/linuxmuster/sophomorix/default-school/teachers.csv).
     The school must be extra given, because it's not possible to know which school a global-administrator would like
     to request. This will overwrite the content of the CSV file, but LMNFile automatically makes a backup of the old
     CSV file.
+
+    Values must not contain `;`, `"` or line breaks. With an `If-Match` header
+    (the `ETag` of the GET), it is refused with 412 if the file was changed in
+    the meantime.
 
     ### Access
     - global-administrators
@@ -113,11 +130,15 @@ def post_management_list_content(school: str, mgmtlist: str, content: MgmtList, 
 
     path = get_mgmtlist_path_or_404(mgmtlist, school)
 
-    try:
-        with LMNFile(path, 'w') as list:
-            return list.write(content.data)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error writing {path}: {str(e)}")
+    check_rows_or_400(content.data, fieldnames(path))
+
+    with unchanged_or_412(path, if_match):
+        try:
+            with LMNFile(path, 'w') as list:
+                list.write(content.data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Error writing {path}: {str(e)}")
+        response.headers['ETag'] = etag(path)
 
 @router.get("/sophomorix-check", name="Run sophomorix-check")
 def do_sophomorix_check(background_tasks: BackgroundTasks, request: Request, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
@@ -148,6 +169,7 @@ def do_sophomorix_check(background_tasks: BackgroundTasks, request: Request, who
     check_tmp_dir()
 
     logpath, pid = new_job_log(f'{who.school}.check.')
+    create_job_or_remove_log('sophomorix-check', who, who.school, pid, logpath)
 
     # -jj writes its JSON payload to stderr (see lmn_getSophomorixValue),
     # so both streams need to land in logpath, not just stdout.
@@ -217,6 +239,8 @@ def do_sophomorix_apply(
     if kill:
         script += f'sophomorix-kill --school {school} >> {logpath};'
         commands_run.append('sophomorix-kill')
+
+    create_job_or_remove_log('sophomorix-apply', who, school, pid, logpath)
 
     try:
         background_tasks.add_task(

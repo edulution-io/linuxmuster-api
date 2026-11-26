@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from security import RoleChecker, AuthenticatedUser
 from .body_schemas import Project
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr, LMNProject
 from linuxmusterTools.common import Validator, NAME_RULES
+from utils import jobs
 from utils.sophomorix import lmn_getSophomorixValue
 from utils.checks import get_project_or_404
 
@@ -171,12 +172,14 @@ def delete_project(project: str, who: AuthenticatedUser = Depends(RoleChecker("G
         raise HTTPException(status_code=403, detail=f"Forbidden")
 
 @router.post("/{project}", name="Create a new project")
-def create_project(project: str, project_details: Project, who: AuthenticatedUser = Depends(RoleChecker("GST"))):
+def create_project(project: str, project_details: Project, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(RoleChecker("GST"))):
     """
     ## Create a new project
 
     *project_details* are the attribute of the project, like *description*,
     *join* if the project should be joinable, *hide*, etc ...
+
+    With `background=true` it returns the id of a job, see `GET /jobs/{job}`.
 
     ### Access
     - global-administrators
@@ -269,27 +272,30 @@ def create_project(project: str, project_details: Project, who: AuthenticatedUse
     # Remove prefix from project name if necessary
     project = project.removeprefix(prefix)
 
-    cmd = ['sophomorix-project',  *options, '--create', '-p', project.lower(), '-jj']
-    try:
-        result =  lmn_getSophomorixValue(cmd, '')
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    def create():
+        cmd = ['sophomorix-project',  *options, '--create', '-p', project.lower(), '-jj']
+        try:
+            result =  lmn_getSophomorixValue(cmd, '')
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
-    output = result.get("OUTPUT", [{}])[0]
-    if output.get("TYPE", "") == "ERROR":
-        raise HTTPException(status_code=400, detail=output["MESSAGE_EN"])
+        output = result.get("OUTPUT", [{}])[0]
+        if output.get("TYPE", "") == "ERROR":
+            raise HTTPException(status_code=400, detail=output["MESSAGE_EN"])
 
-    ProjectWriter = LMNProject(f"{prefix}{project.lower()}", school=who.school)
+        ProjectWriter = LMNProject(f"{prefix}{project.lower()}", school=who.school)
 
-    if project_details.proxyAddresses:
-        ProjectWriter.setattr(data={'proxyAddresses': project_details.proxyAddresses})
+        if project_details.proxyAddresses:
+            ProjectWriter.setattr(data={'proxyAddresses': project_details.proxyAddresses})
 
-    if project_details.displayName:
-        ProjectWriter.setattr(data={'displayName': project_details.displayName})
-    else:
-        ProjectWriter.setattr(data={'displayName': project})
+        if project_details.displayName:
+            ProjectWriter.setattr(data={'displayName': project_details.displayName})
+        else:
+            ProjectWriter.setattr(data={'displayName': project})
 
-    return result
+        return result
+
+    return jobs.run_or_start(background, response, request, 'create-project', who, who.school, create)
 
 @router.patch("/{project}", name="Update the parameters of a specific project")
 def modify_project(project: str, project_details: Project, who: AuthenticatedUser = Depends(RoleChecker("GST"))):

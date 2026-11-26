@@ -18,7 +18,7 @@ linbo_name_checker = NameChecker()
 
 # Logs and status of the background jobs. Not below /tmp, where any local user
 # could create the directory first and place symlinks for root to follow.
-JOB_DIR = '/run/lmnapi'
+JOB_DIR = os.environ.get('LMNAPI_JOB_DIR', '/run/lmnapi')
 
 def check_tmp_dir():
     # Ensure the job directory is ready

@@ -1,4 +1,7 @@
+import os
 import sys
+import tempfile
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,6 +23,10 @@ _TEST_DATA_DEFAULTS = {
 for _var, _default in _TEST_DATA_DEFAULTS.items():
     if not hasattr(credentials, _var):
         setattr(credentials, _var, _default)
+
+# Before the API is imported: the lifespan marks the jobs of its directory as
+# interrupted, it must not be the one of a running service
+os.environ['LMNAPI_JOB_DIR'] = tempfile.mkdtemp(prefix='lmnapi-tests.')
 
 sys.path.append(LOCAL_API_PATH)
 from main import app
@@ -43,7 +50,7 @@ def run_dir(tmp_path, monkeypatch):
     """The directory of the job logs, instead of the one of the service."""
 
     directory = tmp_path / 'lmnapi'
-    directory.mkdir()
+    directory.mkdir(mode=0o700)
     for module in (checks, listmanagement, print_passwords, revocation, sophomorix):
         monkeypatch.setattr(module, 'JOB_DIR', str(directory))
     return directory

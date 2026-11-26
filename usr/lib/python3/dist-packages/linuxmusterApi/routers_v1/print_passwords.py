@@ -4,11 +4,12 @@ import subprocess
 import zlib
 from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from security import RoleChecker, AuthenticatedUser, check_print_permissions
-from utils.checks import get_schoolclass_or_404, get_project_or_404, check_tmp_dir, JOB_DIR
-from .body_schemas import PrintPasswordsSchoolclassesParameter, PrintPasswordsUsersParameter, PrintPasswordsProjectsParameter
+from utils import jobs
+from utils.checks import get_schoolclass_or_404, get_project_or_404, check_tmp_dir, check_valid_school_or_404, JOB_DIR
+from .body_schemas import PrintPasswordsSchoolclassesParameter, PrintPasswordsUsersParameter, PrintPasswordsProjectsParameter, PrintPasswordsTeachersParameter
 
 
 router = APIRouter(
@@ -64,11 +65,18 @@ def print_file(who, config, filename, **selection):
         with open(path, 'rb') as f:
             return f.read()
 
-def print_response(who, config, filename, mtype, **selection):
+def print_or_start(background, request, response, who, school, config, filename, mtype, **selection):
     """
-    Send the file sophomorix-print created.
+    Send the file, or start a job with the file to download.
     """
 
+
+    if background:
+        return jobs.run_or_start(
+            True, response, request, 'print-passwords', who, school,
+            lambda: jobs.JobFile(print_file(who, config, filename, **selection), filename, mtype),
+            with_file=True,
+        )
 
     headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return Response(print_file(who, config, filename, **selection), media_type=mtype, headers=headers)
@@ -123,7 +131,7 @@ def sophomorixprint_cmd(who, config, schoolclasses=[], users=[]):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/schoolclasses", name="Print passwords from schoolclasses")
-def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, who: AuthenticatedUser = Depends(RoleChecker("GST"))):
+def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(RoleChecker("GST"))):
     """
     ## Print passwords from multiple schoolclasses.
 
@@ -133,6 +141,9 @@ def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, 
         - one_per_page: boolean (print one password per page, default false),
         - pdflatex: boolean (use pdflatex or not, default true),
         - school: school of the user, may be necessary for globaladministrators.
+
+    With `background=true` it returns the id of a job, the file is
+    `GET /jobs/{job}/file`.
 
     ### Access
     - global-administrators
@@ -173,10 +184,10 @@ def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, 
         prefix = 'multiclass'
 
     filename = f'{prefix}-{who.user}.{config.format}'
-    return print_response(who, config, filename, mtype, schoolclasses=config.schoolclasses)
+    return print_or_start(background, request, response, who, config.school if who.school == 'global' and config.school else who.school, config, filename, mtype, schoolclasses=config.schoolclasses)
 
 @router.post("/projects", name="Print passwords from projects")
-def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: AuthenticatedUser = Depends(RoleChecker("GST"))):
+def print_passwords_projects(config: PrintPasswordsProjectsParameter, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(RoleChecker("GST"))):
     """
     ## Print passwords from the users multiple projects.
 
@@ -190,6 +201,9 @@ def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: Authe
         - one_per_page: boolean (print one password per page, default false),
         - pdflatex: boolean (use pdflatex or not, default true),
         - school: school of the user, may be necessary for globaladministrators.
+
+    With `background=true` it returns the id of a job, the file is
+    `GET /jobs/{job}/file`.
 
     ### Access
     - global-administrators
@@ -227,11 +241,11 @@ def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: Authe
     users_to_print = check_print_permissions(who, users_to_print)
 
     filename = f'user-{who.user}.{config.format}'
-    return print_response(who, config, filename, mtype, users=users_to_print)
+    return print_or_start(background, request, response, who, config.school if who.school == 'global' and config.school else who.school, config, filename, mtype, users=users_to_print)
 
 
 @router.post("/users", name="Print passwords of users")
-def print_passwords_users(config: PrintPasswordsUsersParameter, who: AuthenticatedUser = Depends(RoleChecker("GST"))):
+def print_passwords_users(config: PrintPasswordsUsersParameter, request: Request, response: Response, background: bool = Query(False, description="Run as a background job, see /jobs"), who: AuthenticatedUser = Depends(RoleChecker("GST"))):
     """
     ## Print passwords of some users.
 
@@ -245,6 +259,9 @@ def print_passwords_users(config: PrintPasswordsUsersParameter, who: Authenticat
         - one_per_page: boolean (print one password per page, default false),
         - pdflatex: boolean (use pdflatex or not, default true),
         - school: school of the user, may be necessary for globaladministrators.
+
+    With `background=true` it returns the id of a job, the file is
+    `GET /jobs/{job}/file`.
 
     ### Access
     - global-administrators
@@ -277,4 +294,47 @@ def print_passwords_users(config: PrintPasswordsUsersParameter, who: Authenticat
     users_to_print = check_print_permissions(who, users_to_print)
 
     filename = f'user-{who.user}.{config.format}'
-    return print_response(who, config, filename, mtype, users=users_to_print)
+    return print_or_start(background, request, response, who, config.school if who.school == 'global' and config.school else who.school, config, filename, mtype, users=users_to_print)
+
+@router.post("/teachers", status_code=202, name="Print passwords of all teachers of a school")
+def print_passwords_teachers(config: PrintPasswordsTeachersParameter, request: Request, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+    """
+    ## Print the first passwords of all teachers of a school.
+
+    Returns the id of a job, the file is `GET /jobs/{job}/file`.
+
+    The body parameters are:
+        - format: pdf or csv (default pdf),
+        - one_per_page: boolean (print one password per page, default false),
+        - pdflatex: boolean (use pdflatex or not, default true),
+        - school: required for globaladministrators.
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school)
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Id of the job
+    """
+
+
+    mtypes = {'pdf': 'application/pdf', 'csv': 'text/csv'}
+    if config.format not in mtypes:
+        raise HTTPException(status_code=400, detail=f"{config.format} is a wrong format")
+
+    if who.school == 'global':
+        if not config.school:
+            raise HTTPException(status_code=400, detail="A specific school is required.")
+        school = check_valid_school_or_404(config.school)
+    elif config.school and config.school != who.school:
+        raise HTTPException(status_code=403, detail="school-administrators can only operate on their own school.")
+    else:
+        school = who.school
+
+    group = 'teachers' if school == 'default-school' else f'{school}-teachers'
+    filename = f'{group}-{who.user}.{config.format}'
+    return print_or_start(True, request, response, who, school, config, filename, mtypes[config.format], schoolclasses=[group])

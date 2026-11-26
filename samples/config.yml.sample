@@ -80,3 +80,8 @@ cors:
     - POST
   allow_headers: ['*']
 
+
+accounts:
+  # Accounts which can not be deleted through the API, in addition to the ones
+  # linuxmuster and edulution need (global-admin, edulutionui-binduser, ...)
+  protected: []

@@ -215,7 +215,7 @@ def test_old_password(monkeypatch):
 def test_a_teacher_can_not_stop_the_exam_of_another(monkeypatch):
     monkeypatch.setattr(exam.lr, 'getval', lambda *a: 'other')
     with pytest.raises(HTTPException) as error:
-        exam.stop_exam_mode(StopExam(users=['max']), who('teacher', 'lehmann'))
+        exam.stop_exam_mode(StopExam(users=['max']), None, None, False, who('teacher', 'lehmann'))
     assert error.value.status_code == 403
 
 

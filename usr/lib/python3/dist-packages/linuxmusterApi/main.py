@@ -20,6 +20,7 @@ from vars import *
 
 from utils.checks import check_tmp_dir
 from security.scope import report_unmatched
+from utils.jobs import mark_interrupted
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ async def lifespan(app: FastAPI):
     app.state.notifications = config.get('notifications', {})
     app.state.rate_limit = config.get('rate_limit', {}) or {}
     app.state.security = config.get('security', {}) or {}
+    app.state.accounts = config.get('accounts', {}) or {}
+    mark_interrupted()
     _report_unreachable_host_key_scopes()
     _report_invalid_rate_limit_whitelist()
     yield
@@ -75,6 +78,7 @@ from routers_v1 import (
     exam,
     extraclasses,
     groups,
+    jobs,
     linbo,
     linbo_drivers,
     linbo_sync,
@@ -128,6 +132,7 @@ _V1_ROUTERS = [
     exam.router,
     extraclasses.router,
     groups.router,
+    jobs.router,
     linbo.router,
     linbo_drivers.router,
     linbo_sync.router,

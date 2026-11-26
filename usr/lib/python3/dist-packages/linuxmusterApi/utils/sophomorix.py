@@ -8,6 +8,7 @@ import ast
 import logging
 from time import time
 
+from . import jobs
 from .checks import check_tmp_dir, JOB_DIR
 from .notifications import notify_completion
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
@@ -163,10 +164,26 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     :type notifications_config: dict
     """
 
-    check_tmp_dir()
     statuspath = f"{JOB_DIR}/{pid}.sophomorix.status"
     logpath = f"{JOB_DIR}/{pid}.sophomorix.log"
 
+    try:
+        check_tmp_dir()
+        jobs.set_running(pid)
+        _process_user(cmd, pid, statuspath, logpath, command, school, caller, notifications_config)
+    except Exception as error:
+        logging.exception(f"Job {pid} failed")
+        # The job first: it must not stay running, even if the status file
+        # cannot be written either
+        if jobs.fail(pid, {'status': 500, 'detail': f'{type(error).__name__}: {error}'}):
+            try:
+                with open(statuspath, 'w') as status:
+                    status.write(f"Process {pid} failed: {type(error).__name__}")
+            except OSError:
+                logging.exception(f"Status of job {pid} could not be written")
+
+
+def _process_user(cmd, pid, statuspath, logpath, command, school, caller, notifications_config):
     start = datetime.now().strftime("%d %b %Y %H:%M:%S")
     with open(statuspath, 'w') as status:
         status.write(f"Process {pid} was started at {start} and is still running.")
@@ -211,6 +228,11 @@ def process_user(cmd, pid, command='', school='', caller='', notifications_confi
     # Only now, the log of a school must not be read before it is filtered
     with open(statuspath, 'w') as status:
         status.write(f"Process {pid} was started at {start} and was completed at {now}")
+
+    if p.returncode == 0:
+        jobs.finish(pid, result={'log': log})
+    else:
+        jobs.finish(pid, error={'status': 500, 'detail': f'{command} failed with exit code {p.returncode}'}, result={'log': log})
 
     notify_completion(
         notifications_config,

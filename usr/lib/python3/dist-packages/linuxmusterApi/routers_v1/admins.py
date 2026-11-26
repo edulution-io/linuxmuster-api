@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from security import RoleChecker, AuthenticatedUser
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
+from utils.accounts import create_account_job, delete_account_job
+from utils.checks import check_valid_school_or_404
+from .body_schemas import NewAccount
 
 
 router_global = APIRouter(
@@ -124,3 +127,105 @@ def get_schooladministrator(admin: str, who: AuthenticatedUser = Depends(RoleChe
 
     raise HTTPException(status_code=404, detail=f"Schooladministrator {admin} not found")
 
+@router_global.post("/{name}", status_code=202, name="Create a globaladministrator")
+def create_globaladministrator(name: str, request: Request, account: NewAccount | None = None, who: AuthenticatedUser = Depends(RoleChecker("G"))):
+    """
+    ## Create a globaladministrator.
+
+    Returns the id of a background job, see `GET /jobs/{job}`. Without
+    `password`, one is generated and part of the result of the job.
+
+    ### Access
+    - global-administrators
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param name: samaccountname of the new account
+    :type name: basestring
+    :param account: Password of the account
+    :type account: NewAccount
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Id of the job
+    :rtype: dict
+    """
+
+
+    return create_account_job(request, who, 'globaladministrator', name, account, school=None)
+
+@router_global.delete("/{name}", status_code=202, name="Delete a globaladministrator")
+def delete_globaladministrator(name: str, request: Request, who: AuthenticatedUser = Depends(RoleChecker("G"))):
+    """
+    ## Delete a globaladministrator.
+
+    The own account and those linuxmuster needs can not be deleted. Returns
+    the id of a background job, see `GET /jobs/{job}`.
+
+    ### Access
+    - global-administrators
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param name: samaccountname of the account
+    :type name: basestring
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    """
+
+
+    return delete_account_job(request, who, 'globaladministrator', name)
+
+@router_school.post("/{name}", status_code=202, name="Create a schooladministrator")
+def create_schooladministrator(name: str, school: str, request: Request, account: NewAccount | None = None, who: AuthenticatedUser = Depends(RoleChecker("G"))):
+    """
+    ## Create a schooladministrator.
+
+    Returns the id of a background job, see `GET /jobs/{job}`. Without
+    `password`, one is generated and part of the result of the job.
+
+    ### Access
+    - global-administrators
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param name: samaccountname of the new account
+    :type name: basestring
+    :param school: School of the account
+    :type school: basestring
+    :param account: Password of the account
+    :type account: NewAccount
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Id of the job
+    :rtype: dict
+    """
+
+
+    check_valid_school_or_404(school)
+    return create_account_job(request, who, 'schooladministrator', name, account, school=school)
+
+@router_school.delete("/{name}", status_code=202, name="Delete a schooladministrator")
+def delete_schooladministrator(name: str, request: Request, who: AuthenticatedUser = Depends(RoleChecker("G"))):
+    """
+    ## Delete a schooladministrator.
+
+    The own account and those linuxmuster needs can not be deleted. Returns
+    the id of a background job, see `GET /jobs/{job}`.
+
+    ### Access
+    - global-administrators
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param name: samaccountname of the account
+    :type name: basestring
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    """
+
+
+    return delete_account_job(request, who, 'schooladministrator', name)

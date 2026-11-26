@@ -1,7 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from security import RoleChecker, AuthenticatedUser
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
+from linuxmusterTools.lmnconfig import (
+    CUSTOM_FIELD_ROLES,
+    ConfigChangedError,
+    CustomFieldsConfig,
+    SchoolSettings,
+    SchoolSettingsError,
+)
+from linuxmusterTools.quotas import apply_school_quota
+from utils import jobs
+from utils.checks import require_school
+from utils.csvfiles import if_match_tags
+from .body_schemas import CustomFieldsBody, SchoolSettingsBody
 
 
 router = APIRouter(
@@ -9,6 +21,57 @@ router = APIRouter(
     tags=["Schools"],
     responses={404: {"description": "Not found"}},
 )
+
+CUSTOM_FIELD_NUMBERS = ('1', '2', '3', '4', '5')
+
+def _etag(if_match, current):
+    """
+    :param if_match: If-Match header, may list several ETags
+    :param current: ETag of the file now, linuxmusterTools compares it again
+        under the lock of the file
+    :return: The ETag a change is based on, None to write in any case
+    """
+
+    tags = if_match_tags(if_match)
+    if tags is None:
+        return None
+    # An ETag no file has, the change is refused
+    return current if current in tags else '""'
+
+def _snapshot(etag, read):
+    """
+    Read a file and its ETag without a change in between, which would make
+    the next PATCH fail with 412 although nobody changed what was read.
+
+    :param etag: Returns the ETag of the file
+    :param read: Returns the content
+    :return: ETag and content
+    :raises HTTPException 503: the file changes all the time
+    """
+
+    for _ in range(5):
+        before = etag()
+        content = read()
+        if etag() == before:
+            return before, content
+    raise HTTPException(status_code=503, detail="The file is being changed, please try again.")
+
+def _custom_fields(school):
+    default = {'title': '', 'show': False, 'editable': False}
+    config = CustomFieldsConfig(school).config or {}
+    result = {'custom': {}, 'customMulti': {}, 'proxyAddresses': {}}
+
+    for role in CUSTOM_FIELD_ROLES:
+        for field_type in ('custom', 'customMulti'):
+            fields = (config.get(field_type) or {}).get(role) or {}
+            # YAML written by hand may carry integer keys
+            result[field_type][role] = {
+                number: {**default, **(fields.get(number) or fields.get(int(number)) or {})}
+                for number in CUSTOM_FIELD_NUMBERS
+            }
+        result['proxyAddresses'][role] = {**default, **((config.get('proxyAddresses') or {}).get(role) or {})}
+
+    return result
 
 @router.get("/", name="List all schools")
 def get_all_schools(who: AuthenticatedUser = Depends(RoleChecker("G"))):
@@ -59,3 +122,191 @@ def get_school(school: str, who: AuthenticatedUser = Depends(RoleChecker("G"))):
         school[role] = len(lr.get(f'/rawroles/{role}'))
 
     return school
+
+@router.get("/{school}/settings", name="Read the settings of a school")
+@require_school
+def get_school_settings(school: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+    """
+    ## Read all settings of a school (school.conf).
+
+    `settings` contains every setting sophomorix knows, with its default if the
+    school does not set it. `schema` tells the type, the default and the limits
+    of each of them, and if it is `restricted` to global-administrators.
+
+    The default quotas of the users are `QUOTA_DEFAULT_GLOBAL`,
+    `QUOTA_DEFAULT_SCHOOL` and `MAILQUOTA_DEFAULT` of each role, e.g. in the
+    section `role.student`.
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school)
+
+    \f
+    :param school: School name
+    :type school: basestring
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Settings and schema
+    :rtype: dict
+    """
+
+
+    school_settings = SchoolSettings(school)
+    response.headers['ETag'], settings = _snapshot(school_settings.etag, school_settings.read)
+    return {"settings": settings, "schema": school_settings.schema}
+
+@router.patch("/{school}/settings", name="Change settings of a school")
+@require_school
+def patch_school_settings(school: str, body: SchoolSettingsBody, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+    """
+    ## Change some settings of a school (school.conf).
+
+    Settings left out are not changed, and nothing is written if one of them is
+    refused. With an `If-Match` header (the `ETag` of the GET), it is refused
+    with 412 if school.conf was changed in the meantime. Example:
+
+    {"settings": {"school": {"PRINTSERVER": "print01"}, "role.student": {"QUOTA_DEFAULT_SCHOOL": 2000}}}
+
+    Changed default quotas only reach the users with
+    `POST /schools/{school}/quotas/apply`.
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school, without the restricted settings)
+
+    \f
+    :param school: School name
+    :type school: basestring
+    :param body: Settings to change
+    :type body: SchoolSettingsBody
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: All settings of the school
+    :rtype: dict
+    """
+
+
+    school_settings = SchoolSettings(school)
+    try:
+        school_settings.update(
+            body.settings, allow_restricted=who.role == 'globaladministrator',
+            etag=_etag(if_match, school_settings.etag()),
+        )
+    except SchoolSettingsError as error:
+        raise HTTPException(status_code=400, detail=error.errors) from error
+    except ConfigChangedError as error:
+        raise HTTPException(status_code=412, detail="school.conf was changed in the meantime, please read it again.") from error
+
+    response.headers['ETag'], settings = _snapshot(school_settings.etag, school_settings.read)
+    return {"settings": settings}
+
+@router.post("/{school}/quotas/apply", status_code=202, name="Apply the quotas of all users of a school")
+@require_school
+def apply_school_quotas(
+        school: str,
+        request: Request,
+        who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+    """
+    ## Write the default and individual quotas of all users of a school to the shares.
+
+    Returns the id of a background job, see `GET /jobs/{job}`.
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school)
+
+    ### This endpoint uses Sophomorix.
+
+    \f
+    :param school: School name
+    :type school: basestring
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Job id
+    :rtype: basestring
+    """
+
+
+    return jobs.start_for(
+        request, 'quota-apply', who, school, lambda: apply_school_quota(school), serial=f'quota-{school}'
+    )
+
+@router.get("/{school}/custom-fields", name="Read the settings of the custom fields")
+@require_school
+def get_custom_fields(school: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+    """
+    ## Read how the custom fields of the users of a school are displayed.
+
+    Title, visibility and write access of `sophomorixCustom1` to `5`
+    (`custom`), `sophomorixCustomMulti1` to `5` (`customMulti`) and
+    `proxyAddresses`, for each role.
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school)
+
+    \f
+    :param school: School name
+    :type school: basestring
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Settings by type, role and number of the field
+    :rtype: dict
+    """
+
+
+    response.headers['ETag'], fields = _snapshot(lambda: CustomFieldsConfig.etag(school), lambda: _custom_fields(school))
+    return fields
+
+@router.patch("/{school}/custom-fields", name="Change the settings of the custom fields")
+@require_school
+def patch_custom_fields(school: str, body: CustomFieldsBody, response: Response, if_match: str | None = Header(default=None), who: AuthenticatedUser = Depends(RoleChecker("GS"))):
+    """
+    ## Change how the custom fields of the users of a school are displayed.
+
+    What is left out is not changed. With an `If-Match` header (the `ETag` of
+    the GET), it is refused with 412 if the file was changed in the meantime.
+    Example:
+
+    {"custom": {"students": {"1": {"title": "Locker", "show": true, "editable": false}}}}
+
+    ### Access
+    - global-administrators
+    - school-administrators (own school)
+
+    \f
+    :param school: School name
+    :type school: basestring
+    :param body: Settings to change
+    :type body: CustomFieldsBody
+    :param who: User requesting the data, read from API Token
+    :type who: AuthenticatedUser
+    :return: Settings by type, role and number of the field
+    :rtype: dict
+    """
+
+
+    changes = body.model_dump(exclude_unset=True, exclude_none=True)
+
+    for field_type, roles in changes.items():
+        for role, fields in roles.items():
+            if role not in CUSTOM_FIELD_ROLES:
+                raise HTTPException(status_code=400, detail=f"Unknown role {role}, allowed are {', '.join(CUSTOM_FIELD_ROLES)}")
+            if field_type != 'proxyAddresses':
+                for index in fields:
+                    if index not in CUSTOM_FIELD_NUMBERS:
+                        raise HTTPException(status_code=400, detail=f"Unknown field {index}, allowed are 1 to 5")
+
+    current = CustomFieldsConfig.etag(school)
+    based_on = _etag(if_match, current)
+    try:
+        if changes:
+            CustomFieldsConfig.update(school, changes, etag=based_on)
+        # Nothing to write for an empty body, the file stays as it is
+        elif based_on not in (None, current):
+            raise ConfigChangedError('custom_fields.yml changed in the meantime')
+    except ConfigChangedError as error:
+        raise HTTPException(status_code=412, detail="custom_fields.yml was changed in the meantime, please read it again.") from error
+
+    response.headers['ETag'], fields = _snapshot(lambda: CustomFieldsConfig.etag(school), lambda: _custom_fields(school))
+    return fields
