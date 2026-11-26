@@ -7,8 +7,10 @@ from pydantic import BaseModel
 
 from linuxmusterTools.common import LdapNotProvisionedError
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
+from linuxmusterTools.ldapconnector.checks import get_account_state, password_marker
 
 from vars import API_V1_PREFIX
+from security.revocation import is_revoked
 from security.scope import allows
 
 
@@ -63,15 +65,21 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
     try:
         payload = jwt.decode(apikey, secret, algorithms=["HS512"])
         user = payload['user']
-    except (jwt.exceptions.InvalidSignatureError, jwt.exceptions.DecodeError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API Key",
-        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Expired API Key",
+        )
+    except (jwt.exceptions.InvalidTokenError, KeyError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+        )
+
+    if is_revoked(apikey):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
         )
 
     # role may be eventually None
@@ -89,12 +97,39 @@ def check_user_header(apikey, secret) -> AuthenticatedUser:
             detail="Invalid API Key",
         )
 
+    check_session(user_details['distinguishedName'], payload)
+
     return AuthenticatedUser(
         dn=user_details['distinguishedName'],
         user=user,
         role=user_details['sophomorixRole'],
         school=user_details.get('sophomorixSchoolname', "")
     )
+
+
+def check_session(dn, payload):
+    """
+    Refuse the token of a disabled account, and one issued for another password: whoever changes the password expects to be the only one
+    left with access.
+
+    :param dn: distinguishedName of the user
+    :type dn: basestring
+    :param payload: Claims of the token. Without pwd it was issued by an older
+        version and stays valid until it expires.
+    :type payload: dict
+    """
+
+    state = get_account_state(dn)
+    valid = state is not None and not state['disabled']
+
+    if valid and 'pwd' in payload:
+        valid = payload['pwd'] == password_marker(state)
+
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+        )
 
 
 def check_host_header(hostkey, client_ip, keys, host_key_auth_enable, method, path) -> AuthenticatedUser:
@@ -124,7 +159,10 @@ def check_host_header(hostkey, client_ip, keys, host_key_auth_enable, method, pa
 
         if hmac.compare_digest(hostkey, secret):
             user = key.get('user', None)
-            valid_ips = key.get('ips', [])
+            valid_ips = key.get('ips') or []
+            # 'in' on a string would accept 10.0.0.1 for 10.0.0.10
+            if isinstance(valid_ips, str):
+                valid_ips = [valid_ips]
 
             if valid_ips and client_ip not in valid_ips:
                 raise HTTPException(

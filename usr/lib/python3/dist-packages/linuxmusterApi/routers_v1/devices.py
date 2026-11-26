@@ -132,14 +132,16 @@ def get_device_details(device: str, credentials: bool = False, who: Authenticate
 
     devices_data = lr.get(f'/devices/{device}', school=who.school)
 
+    if not devices_data:
+        raise HTTPException(status_code=404, detail=f"Device {device} not found")
+
     if credentials:
+        # The credentials of the device found above, not of one with the same
+        # name in another school
         device_manager = DeviceManager()
-        devices_data.update(device_manager.get_credentials(device))
+        devices_data.update(device_manager.get_credentials(device, school=devices_data['sophomorixSchoolname']))
 
-    if devices_data:
-        return devices_data
-
-    raise HTTPException(status_code=404, detail=f"Device {device} not found")
+    return devices_data
 
 @router.patch("/{device}", name="Update some attributes of a specific device")
 def modify_device(device: str, device_details: Device, who: AuthenticatedUser = Depends(RoleChecker("GS"))):

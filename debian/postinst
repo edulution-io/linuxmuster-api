@@ -45,6 +45,8 @@ case "$1" in
         if [ ! -f "/etc/linuxmuster/api/config.yml" ] ; then
             mkdir -p /etc/linuxmuster/api
             SECRET_KEY=$(openssl rand 64 | openssl enc -A -base64)
+            # Never readable for others, not even until the chmod below
+            install -m 600 /dev/null /etc/linuxmuster/api/config.yml
             cat << EOF > /etc/linuxmuster/api/config.yml
 uvicorn:
   port: 8001
@@ -63,14 +65,12 @@ EOF
         mkdir -p /var/log/linuxmuster/api
         cp /usr/lib/python3/dist-packages/linuxmusterApi/templates/uvicorn_log_conf.yml /etc/linuxmuster/api/uvicorn_log_conf.yml
 
-        # For sophomorix users' commands logs
-        mkdir -p /tmp/lmnapi
-        chmod 600 /tmp/lmnapi
-
         msg "Checking certificate"
         if [ ! -f "/etc/linuxmuster/api/lmnapi.pem" ] ; then
             /usr/lib/python3/dist-packages/linuxmusterApi/scripts/lmnapi-ssl-gen.py
         fi
+        # Contains the private key
+        chmod 600 /etc/linuxmuster/api/lmnapi.pem
 
         msg "Reload service linuxmuster-api"
         systemctl enable linuxmuster-api

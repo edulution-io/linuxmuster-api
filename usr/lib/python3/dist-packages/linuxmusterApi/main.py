@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
     app.state.host_key_auth_enable = config.get('host_key_auth', False)
     app.state.notifications = config.get('notifications', {})
     app.state.rate_limit = config.get('rate_limit', {}) or {}
+    app.state.security = config.get('security', {}) or {}
     _report_unreachable_host_key_scopes()
     _report_invalid_rate_limit_whitelist()
     yield

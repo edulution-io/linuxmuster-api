@@ -4,6 +4,14 @@ After=network.target
 
 [Service]
 WorkingDirectory=/usr/lib/python3/dist-packages/linuxmusterApi
+# Logs of the background jobs, not readable for others
+RuntimeDirectory=lmnapi
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+ProtectKernelModules=true
+ProtectKernelLogs=true
+RestrictRealtime=true
+LockPersonality=true
 ExecStart=/opt/linuxmuster/bin/python3 /usr/lib/python3/dist-packages/linuxmusterApi/main.py
 
 [Install]

@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 
-from security import RoleChecker, AuthenticatedUser
+from security import RoleChecker, AuthenticatedUser, BasicChecker
 from .body_schemas import ConnectionRequest
 
 logger = logging.getLogger(__name__)
@@ -217,7 +217,8 @@ def request_connection(data: ConnectionRequest, who: AuthenticatedUser = Depends
     3. A VM whose previous assignment has timed out
 
     ### Access
-    - all authenticated users
+    - all authenticated users, for themselves
+    - global-administrators and school-administrators also for the users they manage
 
     \f
     :param data: Connection request with group and user
@@ -227,6 +228,14 @@ def request_connection(data: ConnectionRequest, who: AuthenticatedUser = Depends
     :return: VM info with IP and SPICE config
     :rtype: dict
     """
+
+    # The answer opens the desktop of data.user: only administrators may
+    # request one for somebody else, within the users they may manage.
+    if data.user != who.user and not (
+        who.role in ('globaladministrator', 'schooladministrator')
+        and BasicChecker("GS")._check_role_permissions(who, data.user)
+    ):
+        raise HTTPException(status_code=403, detail="A desktop can only be requested for yourself.")
 
     vdi_groups = _get_vdi_groups()
     if data.group not in vdi_groups["groups"]:

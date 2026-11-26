@@ -50,6 +50,15 @@ rate_limit:
   # whole budget on the first few of them. Entries that are not IP addresses
   # are logged as warnings when the API starts.
   whitelist: []
+  # Failed logins of one user, whatever address they come from. Needed if a
+  # reverse proxy runs on this host, since loopback is exempted above.
+  user_failures: 20   # 0 or less disables the limit
+  user_window: 300    # seconds
+
+security:
+  # Require old_password if users change their own password. Off by default,
+  # since front-ends have to send it first.
+  require_old_password: false
 
 # Job-completion webhook, sent when a background sophomorix job started via
 # /listmanagement/sophomorix-check or /listmanagement/sophomorix-apply finishes.

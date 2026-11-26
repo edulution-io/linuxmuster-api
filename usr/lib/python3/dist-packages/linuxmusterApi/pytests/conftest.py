@@ -23,7 +23,10 @@ for _var, _default in _TEST_DATA_DEFAULTS.items():
 
 sys.path.append(LOCAL_API_PATH)
 from main import app
+from routers_v1 import listmanagement
+from security import revocation
 from security.rate_limiter import request_counters
+from utils import checks, sophomorix
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -34,3 +37,13 @@ def lifespan():
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
     request_counters.clear()
+
+@pytest.fixture(autouse=True)
+def run_dir(tmp_path, monkeypatch):
+    """The directory of the job logs, instead of the one of the service."""
+
+    directory = tmp_path / 'lmnapi'
+    directory.mkdir()
+    for module in (checks, listmanagement, revocation, sophomorix):
+        monkeypatch.setattr(module, 'JOB_DIR', str(directory))
+    return directory

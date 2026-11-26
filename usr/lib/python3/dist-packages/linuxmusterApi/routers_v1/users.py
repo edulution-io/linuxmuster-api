@@ -1,9 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
-from security import RoleChecker, UserChecker, AuthenticatedUser, UserListChecker
+from security import RoleChecker, UserChecker, AdminOfUserChecker, AuthenticatedUser, UserListChecker
 from .body_schemas import SetFirstPassword, SetCurrentPassword, UserList, User
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from linuxmusterTools.ldapconnector import LMNUser, LMNStudent
+from linuxmusterTools.ldapconnector.models import check_password
+from security.login_failures import add_failure, is_blocked
+from security.rate_limiter import settings
 from linuxmusterTools.passwords import PasswordPolicyProvider
 import linuxmusterTools.quotas
 from utils.checks import get_user_or_404
@@ -16,6 +19,64 @@ router = APIRouter(
     tags=["Users"],
     responses={404: {"description": "Not found"}},
 )
+
+def check_old_password(request, who, user, old_password):
+    """
+    A stolen token must not be enough to take the account over: check the
+    current password of users changing their own one. It is required if
+    security.require_old_password is set in config.yml. Nothing is checked if
+    the password of somebody else is reset.
+
+    :raises HTTPException: 400 not given, 403 wrong, 429 too many failures
+    """
+
+
+    if who.user.lower() != user.lower():
+        return
+
+    if old_password is None:
+        if request.app.state.security.get('require_old_password', False):
+            raise HTTPException(status_code=400, detail="The current password is required.")
+        return
+
+    limits = settings(request)
+    limit, window = limits.get('user_failures', 20), limits.get('user_window', 300)
+    if is_blocked(who.user, limit, window):
+        raise HTTPException(status_code=429, detail="Too Many Requests")
+
+    if not check_password(get_user_or_404(user, who.school).distinguishedName, old_password):
+        add_failure(who.user, window)
+        raise HTTPException(status_code=403, detail="The current password is wrong.")
+
+def check_own_attributes(user_details, data):
+    """
+    Users who are no administrator may only change some attributes of their
+    own account: the photo, and the fields the school made editable for their
+    role. Values which do not change anything are accepted, since a form sends
+    back what it received.
+
+    :param user_details: LDAP object of the user
+    :param data: Attributes to write
+    :return: The attributes the user may write. Values which change nothing are
+        left out, the object may have been changed in the meantime.
+    :rtype: dict
+    :raises HTTPException 403: naming the refused attributes
+    """
+
+
+    allowed, refused = {}, []
+    for attribute, value in data.items():
+        current = getattr(user_details, attribute, None)
+        field = user_details.customFields.get(attribute) or {}
+        if attribute == 'thumbnailPhoto' or field.get('canWrite'):
+            allowed[attribute] = value
+        elif value != current and (value or current):
+            refused.append(attribute)
+
+    if refused:
+        raise HTTPException(status_code=403, detail=f"You are not allowed to change {', '.join(sorted(refused))}.")
+
+    return allowed
 
 @router.get("/", name="List all users")
 def get_all_users(who: AuthenticatedUser = Depends(RoleChecker("G"))):
@@ -85,8 +146,8 @@ def post_user_data(user: str, user_details: User, who: AuthenticatedUser = Depen
     ### Access
     - global-administrators
     - school-administrators
-    - teachers
-    - students
+    - teachers (students)
+    - all users (own photo, and the fields the school made editable)
 
     \f
     :param user: cn of the user to update
@@ -98,12 +159,15 @@ def post_user_data(user: str, user_details: User, who: AuthenticatedUser = Depen
     """
 
 
-    get_user_or_404(user, who.school)
+    current = get_user_or_404(user, who.school)
 
     data = {}
     for key, value in user_details.__dict__.items():
         if (key == "thumbnailPhoto" and value is not None) or value:
             data[key] = value
+
+    if who.user.lower() == user.lower() and who.role not in ('globaladministrator', 'schooladministrator'):
+        data = check_own_attributes(current, data)
 
     UserWriter = LMNUser(user.lower(), who.school)
     UserWriter.setattr(data=data)
@@ -138,7 +202,7 @@ def get_users_from_cn(userlist: UserList, who: AuthenticatedUser = Depends(UserL
     return response
 
 @router.post("/{user}/set-first-password", name="Set user's first password")
-def set_first_user_password(user: str, password: SetFirstPassword, who: AuthenticatedUser = Depends(UserChecker("GST"))):
+def set_first_user_password(user: str, password: SetFirstPassword, request: Request, who: AuthenticatedUser = Depends(UserChecker("GST"))):
     """
     ## Set the first password of the user.
 
@@ -150,6 +214,9 @@ def set_first_user_password(user: str, password: SetFirstPassword, who: Authenti
 
     If *password* is omitted, the current password is instead reset back to
     the existing first password (no new password is generated or stored).
+
+    *old_password* as in *set-current-password*, if the current password of the
+    own account is changed.
 
     ### Access
     - global-administrators
@@ -165,6 +232,9 @@ def set_first_user_password(user: str, password: SetFirstPassword, who: Authenti
     :type who: AuthenticatedUser
     """
 
+
+    if password.password is None or password.set_current:
+        check_old_password(request, who, user, password.old_password)
 
     UserWriter = LMNUser(user, who.school)
 
@@ -200,7 +270,7 @@ def set_first_user_password(user: str, password: SetFirstPassword, who: Authenti
             raise HTTPException(status_code=400, detail=f"Cannot set current password: {str(e)}")
 
 @router.post("/{user}/set-random-first-password", name="Set a random first password for the user")
-def set_random_first_user_password(user: str, who: AuthenticatedUser = Depends(UserChecker("GST"))):
+def set_random_first_user_password(user: str, request: Request, old_password: str | None = Body(None, embed=True), who: AuthenticatedUser = Depends(UserChecker("GST"))):
     """
     ## Generate a random password satisfying the current password policy and
     set it as the user's first and current password.
@@ -208,6 +278,8 @@ def set_random_first_user_password(user: str, who: AuthenticatedUser = Depends(U
     Unlike *set-first-password*, no password is provided by the caller: it is
     generated server-side (see `LMNUser.set_random_first_password`), then
     returned so it can be displayed or printed for the user.
+
+    *old_password* as in *set-current-password*, for the own account.
 
     ### Access
     - global-administrators
@@ -224,6 +296,8 @@ def set_random_first_user_password(user: str, who: AuthenticatedUser = Depends(U
     """
 
 
+    check_old_password(request, who, user, old_password)
+
     UserWriter = LMNUser(user, who.school)
     try:
         password = UserWriter.set_random_first_password()
@@ -233,12 +307,15 @@ def set_random_first_user_password(user: str, who: AuthenticatedUser = Depends(U
     return {"password": password}
 
 @router.post("/{user}/set-current-password", name="Set user's current password")
-def set_current_user_password(user: str, password: SetCurrentPassword, who: AuthenticatedUser = Depends(UserChecker("GST"))):
+def set_current_user_password(user: str, password: SetCurrentPassword, request: Request, who: AuthenticatedUser = Depends(UserChecker("GST"))):
     """
     ## Set the current password of the user.
 
     The **current password** is the password actually used by the user, not
     readable in the LDAP tree.
+
+    *old_password* is checked if given. For the own account it is required if
+    *security.require_old_password* is set in config.yml.
 
     The **first password**, also known as default password, is the readable password
     in the LDAP account, and the one to which it's possible to retrograde if the
@@ -262,6 +339,8 @@ def set_current_user_password(user: str, password: SetCurrentPassword, who: Auth
 
 
     user_details = get_user_or_404(user, who.school)
+
+    check_old_password(request, who, user, password.old_password)
 
     result = password_policy_provider.validate(
         password.password, role=user_details.sophomorixRole, school=who.school, username=user
@@ -312,7 +391,7 @@ def get_user_quotas(user: str, who: AuthenticatedUser = Depends(UserChecker("GST
         raise HTTPException(status_code=404, detail=str(e))
 
 @router.post("/{user}/parents", name='Add parents to a specific user')
-def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depends(UserChecker("GS"))):
+def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depends(AdminOfUserChecker("GS"))):
     """
     ## Add parents to a specific user.
 
@@ -339,7 +418,7 @@ def add_user_parent(user: str, parents: UserList, who: AuthenticatedUser = Depen
     UserWriter.add_parents(parents.users)
 
 @router.delete("/{user}/parents", name='Delete parents from a specific user')
-def delete_user_parents(user: str, parents: UserList, who: AuthenticatedUser = Depends(UserChecker("GS"))):
+def delete_user_parents(user: str, parents: UserList, who: AuthenticatedUser = Depends(AdminOfUserChecker("GS"))):
     """
     ## Delete parents from a specific user.
 

@@ -3,7 +3,7 @@ import tempfile
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 
 from security import RoleChecker, AuthenticatedUser
-from utils.checks import get_mgmtlist_path_or_404, check_valid_school_or_404, check_tmp_dir, require_school
+from utils.checks import get_mgmtlist_path_or_404, check_valid_school_or_404, check_tmp_dir, require_school, JOB_DIR
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.ldapconnector import LMNLdapReader as lr
 from utils.sophomorix import process_user
@@ -15,6 +15,42 @@ router = APIRouter(
     tags=["List Management"],
     responses={404: {"description": "Not found"}},
 )
+
+def job_paths_or_404(pid):
+    """
+    :param pid: Id of a background job
+    :type pid: basestring
+    :return: Path of the log file and of the status file
+    :rtype: tuple
+    """
+
+
+    path = os.path.normpath(os.path.join(JOB_DIR, pid))
+    if not path.startswith(f'{JOB_DIR}/'):
+        raise HTTPException(status_code=404, detail=f"Job {pid} not found.")
+    return f'{path}.sophomorix.log', f'{path}.sophomorix.status'
+
+def new_job_log(prefix):
+    """
+    Create the log file of a background job.
+
+    :param prefix: Start of the job id
+    :type prefix: basestring
+    :return: Path of the log file and id of the job
+    :rtype: tuple
+    """
+
+
+    check_tmp_dir()
+    path = os.path.normpath(os.path.join(JOB_DIR, prefix))
+    if not path.startswith(f'{JOB_DIR}/'):
+        raise HTTPException(status_code=400, detail="Invalid job id.")
+
+    directory, name = os.path.split(path)
+    handle, logpath = tempfile.mkstemp(prefix=name, suffix='.sophomorix.log', dir=directory)
+    # Only the path is needed, an open descriptor per job would pile up
+    os.close(handle)
+    return logpath, os.path.basename(logpath).removesuffix('.sophomorix.log')
 
 @router.get("/{school}/{mgmtlist}", name="Get the content of a specific management list")
 @require_school
@@ -91,7 +127,7 @@ def do_sophomorix_check(background_tasks: BackgroundTasks, request: Request, who
     Returns a job id (pid) immediately; poll
     `GET /listmanagement/sophomorix-jobs/status/{pid}` for the result (that
     endpoint isn't apply-specific despite its path, it just reads
-    /tmp/lmnapi/{pid}.sophomorix.{log,status} for any job id). Configure
+    /run/lmnapi/{pid}.sophomorix.{log,status} for any job id). Configure
     `notifications.callback_url` in config.yml to be notified on completion
     instead of polling (see utils/notifications.py).
 
@@ -111,8 +147,7 @@ def do_sophomorix_check(background_tasks: BackgroundTasks, request: Request, who
 
     check_tmp_dir()
 
-    _, logpath = tempfile.mkstemp(prefix=f'{who.school}.check.', suffix='.sophomorix.log', dir='/tmp/lmnapi')
-    pid = logpath.replace(".sophomorix.log", "").replace("/tmp/lmnapi/", "")
+    logpath, pid = new_job_log(f'{who.school}.check.')
 
     # -jj writes its JSON payload to stderr (see lmn_getSophomorixValue),
     # so both streams need to land in logpath, not just stdout.
@@ -166,7 +201,7 @@ def do_sophomorix_apply(
 
     check_tmp_dir()
 
-    _, logpath = tempfile.mkstemp(prefix=f'{school}.', suffix='.sophomorix.log', dir='/tmp/lmnapi')
+    logpath, pid = new_job_log(f'{school}.')
 
     script = ''
     commands_run = []
@@ -184,7 +219,6 @@ def do_sophomorix_apply(
         commands_run.append('sophomorix-kill')
 
     try:
-        pid = logpath.replace(".sophomorix.log", "").replace("/tmp/lmnapi/", "")
         background_tasks.add_task(
             process_user, script, pid,
             command='+'.join(commands_run), school=school, caller=who.user,
@@ -217,18 +251,26 @@ def get_status_sophomorix_apply(pid: str, who: AuthenticatedUser = Depends(RoleC
     """
 
 
-    logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-    statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+    logpath, statuspath = job_paths_or_404(pid)
+
+    # The id starts with the school of the job
+    if who.school != 'global' and not pid.startswith(f'{who.school}.'):
+        raise HTTPException(status_code=404, detail=f"Job {pid} not found.")
 
     if not os.path.isfile(logpath) or not os.path.isfile(statuspath):
         raise HTTPException(status_code=404, detail=f"Log file {logpath} not found.")
 
     try:
-        with open(logpath, 'r') as f:
-            log = f.readlines()
-
+        # The status first: the log of a check is only reduced to the school of
+        # the user when the job is completed
         with open(statuspath, 'r') as f:
             status = f.read()
+
+        if who.school != 'global' and pid.startswith(f'{who.school}.check.') and 'was completed at' not in status:
+            log = []
+        else:
+            with open(logpath, 'r') as f:
+                log = f.readlines()
 
         return {"status": status, "log": log}
 

@@ -43,6 +43,7 @@ class TestCheckUserHeaderProvisioning:
                 'distinguishedName': 'CN=jdoe,DC=test',
             },
         )
+        monkeypatch.setattr(header_module, 'get_account_state', lambda dn: {'disabled': False, 'pwd_last_set': None})
 
         result = check_user_header(make_jwt(), SECRET)
 

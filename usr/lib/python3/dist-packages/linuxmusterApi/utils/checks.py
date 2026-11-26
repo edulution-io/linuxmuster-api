@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 linbo_name_checker = NameChecker()
 
 
+# Logs and status of the background jobs. Not below /tmp, where any local user
+# could create the directory first and place symlinks for root to follow.
+JOB_DIR = '/run/lmnapi'
+
 def check_tmp_dir():
-    # Ensure tmp directory is ready
-    if not os.path.exists('/tmp/lmnapi'):
-        os.makedirs('/tmp/lmnapi')
-        os.chmod('/tmp/lmnapi', 0o600)
+    # Ensure the job directory is ready
+    os.makedirs(JOB_DIR, mode=0o700, exist_ok=True)
+    os.chmod(JOB_DIR, 0o700)
 
 def get_user_or_404(user, school):
     try:
@@ -66,8 +69,8 @@ def get_schoolclass_or_404(schoolclass, who, as_dict=True):
             return schoolclass_data
         elif not hidden:
             return schoolclass_data
-    else:
-        raise HTTPException(status_code=403, detail=f"Forbidden")
+
+    raise HTTPException(status_code=403, detail="Forbidden")
 
 def get_extraclass_or_404(schoolclass, school):
     try:

@@ -2,6 +2,9 @@ import pytest
 
 from routers_v1.body_schemas import StopExam
 from routers_v1.exam import stop_exam_mode
+from security import AuthenticatedUser
+
+WHO = AuthenticatedUser(dn='', user='ga', role='globaladministrator', school='global')
 
 
 class FakeProcess:
@@ -28,25 +31,25 @@ def subdir(cmd):
 class TestStopExamTarget:
 
     def test_without_group_the_name_has_no_none(self, calls):
-        result = stop_exam_mode(StopExam(users=['s01']), who=None)
+        result = stop_exam_mode(StopExam(users=['s01']), who=WHO)
 
         assert 'None' not in result['target']
         assert result['target'].startswith('EXAM_')
         assert subdir(calls[0]) == f"transfer/collected/{result['target']}"
 
     def test_with_group_the_name_carries_type_and_name(self, calls):
-        result = stop_exam_mode(StopExam(users=['s01'], group_type='classes', group_name='8a'), who=None)
+        result = stop_exam_mode(StopExam(users=['s01'], group_type='classes', group_name='8a'), who=WHO)
 
         assert result['target'].startswith('EXAM_classes_8a_')
 
     def test_a_returned_target_collects_the_next_batch_in_the_same_directory(self, calls):
-        first = stop_exam_mode(StopExam(users=['s01', 's02'], group_type='classes', group_name='8a'), who=None)
-        stop_exam_mode(StopExam(users=['s03'], group_type='classes', group_name='8a', target=first['target']), who=None)
+        first = stop_exam_mode(StopExam(users=['s01', 's02'], group_type='classes', group_name='8a'), who=WHO)
+        stop_exam_mode(StopExam(users=['s03'], group_type='classes', group_name='8a', target=first['target']), who=WHO)
 
         assert subdir(calls[0]) == subdir(calls[1])
 
     def test_a_target_sent_by_the_client_is_escaped(self, calls):
-        result = stop_exam_mode(StopExam(users=['s01'], target="../x'; rm -rf"), who=None)
+        result = stop_exam_mode(StopExam(users=['s01'], target="../x'; rm -rf"), who=WHO)
 
         assert result['target'] == '___x___rm_-rf'
         assert subdir(calls[0]) == 'transfer/collected/___x___rm_-rf'

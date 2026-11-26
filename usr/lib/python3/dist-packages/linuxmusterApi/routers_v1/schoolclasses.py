@@ -115,40 +115,35 @@ def modify_schoolclass(schoolclass: str, schoolclass_details: SchoolclassAttr, w
     if schoolclass_details.description:
         options.extend(['--description', schoolclass_details.description])
 
-    if schoolclass_details.join:
-        options.append('--join')
-    else:
-        options.append('--nojoin')
+    # Only what was sent: a partial update must not open a hidden group
+    if 'join' in schoolclass_details.model_fields_set:
+        options.append('--join' if schoolclass_details.join else '--nojoin')
 
-    if schoolclass_details.hide:
-        options.append('--hide')
-    else:
-        options.append('--nohide')
+    if 'hide' in schoolclass_details.model_fields_set:
+        options.append('--hide' if schoolclass_details.hide else '--nohide')
 
-    if schoolclass_details.mailalias:
-        options.append('--mailalias')
-    else:
-        options.append('--nomailalias')
+    if 'mailalias' in schoolclass_details.model_fields_set:
+        options.append('--mailalias' if schoolclass_details.mailalias else '--nomailalias')
 
-    if schoolclass_details.maillist:
-        options.append('--maillist')
-    else:
-        options.append('--nomaillist')
+    if 'maillist' in schoolclass_details.model_fields_set:
+        options.append('--maillist' if schoolclass_details.maillist else '--nomaillist')
 
     if schoolclass_details.mailquota is not None:
         # Only mailquota without comment
         options.extend(['--mailquota', f"{schoolclass_details.mailquota}:"])
 
-    cmd = ['sophomorix-class',  *options, '-c', schoolclass.lower(), '-jj']
+    result = {}
+    if options:
+        cmd = ['sophomorix-class',  *options, '-c', schoolclass.lower(), '-jj']
 
-    try:
-        result =  lmn_getSophomorixValue(cmd, '')
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        try:
+            result =  lmn_getSophomorixValue(cmd, '')
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
-    output = result.get("OUTPUT", [{}])[0]
-    if output.get("TYPE", "") == "ERROR":
-        raise HTTPException(status_code=400, detail=output["MESSAGE_EN"])
+        output = result.get("OUTPUT", [{}])[0]
+        if output.get("TYPE", "") == "ERROR":
+            raise HTTPException(status_code=400, detail=output["MESSAGE_EN"])
 
     if schoolclass_details.displayName:
         if "-" in schoolclass:

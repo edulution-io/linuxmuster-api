@@ -151,7 +151,7 @@ def delete_project(project: str, who: AuthenticatedUser = Depends(RoleChecker("G
 
     project_details = get_project_or_404(project, who, as_dict=False)
 
-    projectname = project.replace(prefix, "")
+    projectname = project.removeprefix(prefix)
 
     if who.school != "global":
         cmd = ['sophomorix-project', '--kill', '-p', projectname, '--school', who.school, '-jj']
@@ -267,7 +267,7 @@ def create_project(project: str, project_details: Project, who: AuthenticatedUse
             options.extend([f'--{option}', ','.join(getattr(project_details, option))])
 
     # Remove prefix from project name if necessary
-    project = project.replace(prefix, "")
+    project = project.removeprefix(prefix)
 
     cmd = ['sophomorix-project',  *options, '--create', '-p', project.lower(), '-jj']
     try:
@@ -352,25 +352,18 @@ def modify_project(project: str, project_details: Project, who: AuthenticatedUse
     if project_details.description:
         options.extend(['--description', project_details.description])
 
-    if project_details.join:
-        options.append('--join')
-    else:
-        options.append('--nojoin')
+    # Only what was sent: a partial update must not open a hidden group
+    if 'join' in project_details.model_fields_set:
+        options.append('--join' if project_details.join else '--nojoin')
 
-    if project_details.hide:
-        options.append('--hide')
-    else:
-        options.append('--nohide')
+    if 'hide' in project_details.model_fields_set:
+        options.append('--hide' if project_details.hide else '--nohide')
 
-    if project_details.mailalias:
-        options.append('--mailalias')
-    else:
-        options.append('--nomailalias')
+    if 'mailalias' in project_details.model_fields_set:
+        options.append('--mailalias' if project_details.mailalias else '--nomailalias')
 
-    if project_details.maillist:
-        options.append('--maillist')
-    else:
-        options.append('--nomaillist')
+    if 'maillist' in project_details.model_fields_set:
+        options.append('--maillist' if project_details.maillist else '--nomaillist')
 
     if project_details.mailquota is not None:
         options.extend(['--addmailquota', f"{project_details.mailquota}:"])
@@ -391,12 +384,14 @@ def modify_project(project: str, project_details: Project, who: AuthenticatedUse
     #     options.extend(['--school', project_details.school])
 
     # project can be given with or without prefix here
-    cmd = ['sophomorix-project',  *options, '-p', project.lower(), '-jj']
-    result =  lmn_getSophomorixValue(cmd, '')
+    result = {}
+    if options:
+        cmd = ['sophomorix-project',  *options, '-p', project.lower(), '-jj']
+        result =  lmn_getSophomorixValue(cmd, '')
 
-    output = result.get("OUTPUT", [{}])[0]
-    if output.get("TYPE", "") == "ERROR":
-        raise HTTPException(status_code=400, detail=output["MESSAGE_EN"])
+        output = result.get("OUTPUT", [{}])[0]
+        if output.get("TYPE", "") == "ERROR":
+            raise HTTPException(status_code=400, detail=output["MESSAGE_EN"])
 
     ProjectWriter = LMNProject(f"{project.lower()}", school=who.school)
 

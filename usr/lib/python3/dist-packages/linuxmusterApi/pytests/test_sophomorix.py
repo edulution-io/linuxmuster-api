@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from utils import checks
 from utils.sophomorix import parse_sophomorix_json, process_user
 
 
@@ -23,8 +24,8 @@ class TestProcessUser:
 
     def test_writes_status_transitions_and_notifies_success(self, monkeypatch):
         pid = _pid()
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         def fake_popen(cmd, **kwargs):
             # The real script redirects its own output to logpath via shell
@@ -41,7 +42,7 @@ class TestProcessUser:
 
         process_user(
             f'true >> {logpath};', pid,
-            command='sophomorix-check', school='default-school', caller='admin',
+            command='sophomorix-add', school='default-school', caller='admin',
             notifications_config={'callback_url': 'https://example.test'},
         )
 
@@ -50,7 +51,7 @@ class TestProcessUser:
             assert 'was completed at' in f.read()
 
         assert notified['job_id'] == pid
-        assert notified['command'] == 'sophomorix-check'
+        assert notified['command'] == 'sophomorix-add'
         assert notified['school'] == 'default-school'
         assert notified['caller'] == 'admin'
         assert notified['status'] == 'success'
@@ -62,8 +63,8 @@ class TestProcessUser:
 
     def test_nonzero_exit_code_reported_as_failed(self, monkeypatch):
         pid = _pid()
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         def fake_popen(cmd, **kwargs):
             with open(logpath, 'w') as f:
@@ -85,7 +86,7 @@ class TestProcessUser:
 
     def test_missing_log_file_reports_empty_log(self, monkeypatch):
         pid = _pid()
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         monkeypatch.setattr('utils.sophomorix.subprocess.Popen', lambda cmd, **kwargs: FakeCompletedProcess(0))
 
@@ -103,7 +104,7 @@ class TestProcessUser:
         # notify_completion() itself that no-ops on an empty config — kept
         # that way so process_user() doesn't need its own separate guard.
         pid = _pid()
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         monkeypatch.setattr('utils.sophomorix.subprocess.Popen', lambda cmd, **kwargs: FakeCompletedProcess(0))
 
@@ -118,8 +119,8 @@ class TestProcessUser:
 
     def test_check_output_is_parsed_and_update_kill_overlap_filtered(self, monkeypatch):
         pid = _pid()
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         raw_check_output = (
             "some diagnostic noise\n"
@@ -154,8 +155,8 @@ class TestProcessUser:
 
     def test_check_output_without_json_markers_falls_back_to_raw_log(self, monkeypatch):
         pid = _pid()
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         def fake_popen(cmd, **kwargs):
             with open(logpath, 'w') as f:
@@ -179,8 +180,8 @@ class TestProcessUser:
         # The parse/filter step is sophomorix-check-specific: a plain-text
         # sophomorix-add/update/kill log must never be run through it.
         pid = _pid()
-        logpath = f"/tmp/lmnapi/{pid}.sophomorix.log"
-        statuspath = f"/tmp/lmnapi/{pid}.sophomorix.status"
+        logpath = f"{checks.JOB_DIR}/{pid}.sophomorix.log"
+        statuspath = f"{checks.JOB_DIR}/{pid}.sophomorix.status"
 
         def fake_popen(cmd, **kwargs):
             with open(logpath, 'w') as f:

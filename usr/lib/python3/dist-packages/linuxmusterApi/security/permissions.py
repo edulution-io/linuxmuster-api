@@ -163,6 +163,29 @@ class UserChecker(BasicChecker):
             detail='Permission denied')
 
 
+class AdminOfUserChecker(BasicChecker):
+    """
+    Like UserChecker, but without access of the users to their own account:
+    for data only the given roles may change.
+    """
+
+
+    def __init__(self, roles) -> None:
+        BasicChecker.__init__(self, roles)
+
+    def __call__(self, who: AuthenticatedUser = Depends(check_authentication_header), user=None) -> AuthenticatedUser:
+
+        if who.role == 'globaladministrator':
+            return who
+
+        if who.role in self.roles and who.user != user and self._check_role_permissions(who, user):
+            return who
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Permission denied')
+
+
 class UserListChecker(BasicChecker):
     """
     Check role and user for permission access for command that need to be run over several users.
