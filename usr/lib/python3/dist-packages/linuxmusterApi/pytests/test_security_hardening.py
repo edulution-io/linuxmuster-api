@@ -315,3 +315,18 @@ def test_a_job_id_can_not_leave_the_job_directory():
     with pytest.raises(HTTPException) as error:
         listmanagement.get_status_sophomorix_apply('abc./../../x', who('schooladministrator', 'sa', 'abc'))
     assert error.value.status_code == 404
+
+
+def test_a_revocation_being_written_is_not_removed(run_dir):
+    revocation.revoke(token(jti='a'), 2**31)
+    tmp = run_dir / 'revoked' / 'other.4711.tmp'
+    tmp.write_text('')
+    revocation.revoke(token(jti='b'), 2**31)
+    assert tmp.exists()
+    old = run_dir / 'revoked' / 'crashed.1.tmp'
+    old.write_text('')
+    import os
+    os.utime(old, (1, 1))
+    revocation.revoke(token(jti='c'), 2**31)
+    assert tmp.exists() and revocation.is_revoked(token(jti='a'))
+
