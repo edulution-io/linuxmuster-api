@@ -268,7 +268,7 @@ def test_configs_without_any_match_returns_an_empty_list(monkeypatch):
     reader.get_configs_by_ids.return_value = []
     monkeypatch.setattr(linbo, "LinboGrubReader", lambda: reader)
 
-    assert linbo.get_configs(["unknown"], None) == {"configs": []}
+    assert linbo.get_configs(["unknown"], SimpleNamespace(school="global")) == {"configs": []}
 
 
 def test_scan_school_admin_cannot_target_another_school(linbo_backends):
@@ -618,6 +618,7 @@ def test_host_status_last_sync_is_utc_aware(host_status_backends):
 def test_host_status_looks_up_the_log_under_the_school_prefixed_name(host_status_backends):
     _, workstations, config, sync, _ = host_status_backends
     workstations.return_value, config.return_value = _one_image_group()
+    workstations.return_value = {"lehrer__win11": workstations.return_value["win11"]}
 
     linbo.host_status(
         hostname="pc100",

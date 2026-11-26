@@ -5,6 +5,7 @@ All business logic lives in linuxmusterTools.linbo modules.
 This router only handles HTTP concerns (auth, validation, responses).
 """
 
+import re
 import os.path
 import subprocess
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from security import AuthenticatedUser, RoleChecker
 from utils.checks import (
     check_linbo_backup_date_or_404,
+    check_linbo_group_access,
     check_new_linbo_image_name_or_409,
     check_valid_school_or_404,
     get_linbo_image_group_or_404,
@@ -39,17 +41,48 @@ from linuxmusterTools.ldapconnector.checks import valid_schools
 from linuxmusterTools.devices import Devices
 
 from linuxmusterTools.linbo import *
+from linuxmusterTools.linbo.group_ids import try_get_linbo_group_id as _try_get_linbo_group_id
 from linuxmusterTools.lmnfile import LMNFile
 from linuxmusterTools.common.checks import NameChecker
 
 
+def try_get_linbo_group_id(school, group):
+    """
+    The group id of a devices.csv group, None for a group without a usable id.
+    An empty or whitespace-only group has none either: the tools helper would
+    answer 'abc__' for it, while generate_dnsmasq_proxy leaves such a host out.
+    """
+
+    group = "" if group is None else str(group)
+    if not group.strip():
+        return None
+    return _try_get_linbo_group_id(school, group)
+
+
 name_checker = NameChecker()
+
+# Group ids are file names in the GRUB directory: no path, no dots
+GRUB_CONFIG_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{1,100}')
 
 router = APIRouter(
     prefix="/linbo",
     tags=["LINBO"],
     responses={404: {"description": "Not found"}},
 )
+
+
+def _config_manager(who: AuthenticatedUser) -> LinboConfigManager:
+    """
+    The start.conf manager scoped to the school of the user: a
+    global-administrator manages every group, a school-administrator the
+    groups of their own school.
+    """
+
+    if who.school == 'global':
+        return LinboConfigManager(school=None)
+    if not who.school:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return LinboConfigManager(school=who.school)
 
 # --- Paths ---
 
@@ -158,6 +191,7 @@ def restart_services(
 
 
 @router.get("/health", name="LINBO subsystem health check")
+@require_school
 def linbo_health(
     school: str = "default-school",
     who: AuthenticatedUser = Depends(RoleChecker("GS")),
@@ -165,9 +199,11 @@ def linbo_health(
     """
     ## LINBO subsystem health check.
 
+    The start.conf and GRUB config counts are those of the school.
+
     ### Access
     - global-administrators
-    - school-administrators
+    - school-administrators (scoped to their own school)
 
     \f
     :param school: School name (default: default-school)
@@ -177,15 +213,19 @@ def linbo_health(
 
     check_valid_school_or_404(school)
     csv_path_exists = os.path.isfile(Devices(school).path)
-    config_ids = LinboConfigManager().group_ids
-    grub_reader = LinboGrubReader()
+    school_manager = LinboConfigManager(school=school)
+    config_ids = school_manager.group_ids
+    grub_ids = [
+        grub_id for grub_id in LinboGrubReader().list_grub_cfg_ids()
+        if school_manager.owns(grub_id)
+    ]
 
     return {
         "status": "ok" if csv_path_exists and LINBO_DIR.is_dir() else "degraded",
         "devicesCSV": csv_path_exists,
         "linboDir": LINBO_DIR.is_dir(),
         "startConfs": len(config_ids),
-        "grubConfigs": len(grub_reader.list_grub_cfg_ids()),
+        "grubConfigs": len(grub_ids),
     }
 
 
@@ -199,6 +239,10 @@ def get_changes(
     """
     ## Get changes since last sync (delta feed).
 
+    Besides the delta lists, `hostGroupIds` maps the MAC of every host of the
+    school to its `linboGroupId` (`<school>__<group>`, the plain group for
+    default-school; null if the group cannot get an id).
+
     ### Access
     - global-administrators
     - school-administrators (scoped to their own school)
@@ -211,7 +255,16 @@ def get_changes(
 
     check_valid_school_or_404(school)
     tracker = LinboChangeTracker(school=school)
-    return tracker.get_changes(since_cursor=since)
+    changes = tracker.get_changes(since_cursor=since)
+
+    # mac -> linboGroupId, the same id as linboGroupId of /hosts/query; the
+    # tracker has just reloaded the devices of the school.
+    changes["hostGroupIds"] = {
+        host["mac"]: try_get_linbo_group_id(school, host.get("group"))
+        for host in tracker.devices_mgr.devices
+        if host.get("mac")
+    }
+    return changes
 
 
 @router.post("/hosts/query", name="Query hosts by MAC address list")
@@ -223,6 +276,10 @@ def query_hosts(
 ):
     """
     ## Get host records for a list of MAC addresses.
+
+    Every host carries `group` as in devices.csv and `linboGroupId`, the
+    school-qualified id of that group (`<school>__<group>`, the plain group
+    for default-school; null if the group cannot get an id).
 
     ### Access
     - global-administrators
@@ -239,16 +296,21 @@ def query_hosts(
     if len(body.macs) > 500:
         raise HTTPException(status_code=400, detail="Maximum 500 MACs per request")
 
-    hosts = Devices(school=school).get_hosts_by_macs(body.macs)
+    # group stays the plain devices.csv value; linboGroupId is the id naming
+    # the start.conf and GRUB config of the host, null for a group without one.
+    hosts = [
+        {**host, "linboGroupId": try_get_linbo_group_id(school, host.get("group"))}
+        for host in Devices(school=school).get_hosts_by_macs(body.macs)
+    ]
 
     return {"hosts": hosts}
 
 
-# startconfs/configs, like everything else under /srv/linbo, carry no school:
-# group_id addresses one flat, server-wide set of files. School-admins were
-# given access anyway (issue #37), since the school console has always given
-# them the same, and each dangerous endpoint says so in its description. The
-# real fix is per-school LINBO files, planned separately.
+# The hardware groups belong to a school: the id of a group names it
+# (<school>__<group>, the plain group for default-school). A school-admin
+# addresses the groups of their own school only (issue #37), a global-admin
+# every group. images, boot-logs and the examples carry no group and stay
+# server-wide.
 @router.get("/linbo-groups", name="List LINBO hardware group IDs")
 def get_linbo_groups(
     who: AuthenticatedUser = Depends(RoleChecker("GS")),
@@ -262,7 +324,7 @@ def get_linbo_groups(
     """
 
 
-    return {"groups": LinboConfigManager().group_ids}
+    return {"groups": _config_manager(who).group_ids}
 
 @router.get("/startconfs", name="Get start.conf files by ID")
 def get_startconfs(
@@ -283,7 +345,7 @@ def get_startconfs(
 
     ids = _parse_list_query(id, "id", 100)
 
-    raw_startconfs = LinboConfigManager().load_raw_startconfs(ids)
+    raw_startconfs = _config_manager(who).load_raw_startconfs(ids)
 
     return {"startConfs": raw_startconfs}
 
@@ -298,9 +360,9 @@ def write_startconf(
     """
     ## Create or update a start.conf file for a LINBO group.
 
-    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
-    server, so a school-administrator changes here what every school uses.
-    Per-school LINBO files are a later step.
+    A school-administrator addresses the groups of their own school only: the
+    id carries it (`<school>__<group>`, the plain group for default-school).
+    A group of another school is refused with 403.
 
     The payload is the raw file content (comments and formatting preserved
     verbatim), matching the shape returned by GET /startconfs. The file is
@@ -316,8 +378,10 @@ def write_startconf(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        LinboConfigManager().write_raw_startconf(group_id, body.content)
+        _config_manager(who).write_raw_startconf(group_id, body.content)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -332,9 +396,9 @@ def delete_startconf(
     """
     ## Delete a start.conf file and its associated GRUB config.
 
-    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
-    server, so a school-administrator changes here what every school uses.
-    Per-school LINBO files are a later step.
+    A school-administrator addresses the groups of their own school only: the
+    id carries it (`<school>__<group>`, the plain group for default-school).
+    A group of another school is refused with 403.
 
     Same behaviour as the legacy webui `lmn_linbo4` plugin.
 
@@ -347,8 +411,10 @@ def delete_startconf(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        LinboConfigManager().delete_startconf(group_id)
+        _config_manager(who).delete_startconf(group_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
@@ -378,8 +444,10 @@ def list_startconf_backups(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        backups = LinboConfigManager().list_startconf_backups(group_id)
+        backups = _config_manager(who).list_startconf_backups(group_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -398,9 +466,9 @@ def restore_startconf_backup(
     """
     ## Put a backup back in place as the group's start.conf.
 
-    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
-    server, so a school-administrator changes here what every school uses.
-    Per-school LINBO files are a later step.
+    A school-administrator addresses the groups of their own school only: the
+    id carries it (`<school>__<group>`, the plain group for default-school).
+    A group of another school is refused with 403.
 
     The current start.conf is backed up first, so this can itself be undone,
     and the backup is copied verbatim - comments and formatting included.
@@ -416,8 +484,10 @@ def restore_startconf_backup(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        LinboConfigManager().restore_startconf_backup(group_id, timestamp)
+        _config_manager(who).restore_startconf_backup(group_id, timestamp)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
@@ -438,9 +508,9 @@ def delete_startconf_backup(
     """
     ## Delete one backup of a group's start.conf.
 
-    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
-    server, so a school-administrator changes here what every school uses.
-    Per-school LINBO files are a later step.
+    A school-administrator addresses the groups of their own school only: the
+    id carries it (`<school>__<group>`, the plain group for default-school).
+    A group of another school is refused with 403.
 
     Irreversible, and rarely needed: the ten-version rotation already drops
     old backups on its own.
@@ -455,8 +525,10 @@ def delete_startconf_backup(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        LinboConfigManager().delete_startconf_backup(group_id, timestamp)
+        _config_manager(who).delete_startconf_backup(group_id, timestamp)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
@@ -486,8 +558,10 @@ def get_startconf_vdi(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        return LinboConfigManager().read_vdi_config(group_id)
+        return _config_manager(who).read_vdi_config(group_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
@@ -503,9 +577,9 @@ def write_startconf_vdi(
     """
     ## Create or replace the VDI config of a LINBO group.
 
-    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
-    server, so a school-administrator changes here what every school uses.
-    Per-school LINBO files are a later step.
+    A school-administrator addresses the groups of their own school only: the
+    id carries it (`<school>__<group>`, the plain group for default-school).
+    A group of another school is refused with 403.
 
     The body replaces the file as a whole: a field left out of the request is
     left out of the file, and the previous version is backed up. Unknown
@@ -525,8 +599,10 @@ def write_startconf_vdi(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        LinboConfigManager().write_vdi_config(group_id, body.model_dump(exclude_unset=True))
+        _config_manager(who).write_vdi_config(group_id, body.model_dump(exclude_unset=True))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -541,9 +617,9 @@ def delete_startconf_vdi(
     """
     ## Delete the VDI config of a LINBO group, disabling VDI for that group.
 
-    **Not school-scoped.** `/srv/linbo` holds one set of files for the whole
-    server, so a school-administrator changes here what every school uses.
-    Per-school LINBO files are a later step.
+    A school-administrator addresses the groups of their own school only: the
+    id carries it (`<school>__<group>`, the plain group for default-school).
+    A group of another school is refused with 403.
 
     The group's start.conf is left untouched.
 
@@ -556,8 +632,10 @@ def delete_startconf_vdi(
     """
 
 
+    check_linbo_group_access(group_id, who)
+
     try:
-        LinboConfigManager().delete_vdi_config(group_id)
+        _config_manager(who).delete_vdi_config(group_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
@@ -651,6 +729,10 @@ def get_configs(
     """
     ## Get GRUB configuration files for a list of group IDs.
 
+    A school-administrator can only read the configs of the groups of their own
+    school (`<school>__<group>`, the plain group for default-school); any other
+    id is refused with 403.
+
     ### Access
     - global-administrators
     - school-administrators
@@ -661,6 +743,10 @@ def get_configs(
 
 
     ids = _parse_list_query(id, "id", 100)
+    for config_id in ids:
+        if not GRUB_CONFIG_ID_PATTERN.fullmatch(config_id):
+            raise HTTPException(status_code=400, detail=f"Invalid GRUB config id: {config_id}")
+        check_linbo_group_access(config_id, who)
 
     grub_reader = LinboGrubReader()
     results = grub_reader.get_configs_by_ids(ids)
@@ -704,7 +790,7 @@ def dhcp_export_dnsmasq(
         raise HTTPException(status_code=404, detail="devices.csv empty")
 
     exporter = LinboDhcpExporter()
-    content = exporter.generate_dnsmasq_proxy(devices)
+    content = exporter.generate_dnsmasq_proxy(devices, school=school)
     etag = exporter.content_etag(content)
 
     if_none_match = request.headers.get("if-none-match")
@@ -739,9 +825,12 @@ def get_all_grub_configs(
     check_valid_school_or_404(school)
 
     try:
-        school_groups = Devices(school=school).groups
+        device_groups = Devices(school=school).groups
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"School '{school}' not found")
+
+    # the GRUB configs are named by group id (<school>__<group> outside default-school)
+    school_groups = {try_get_linbo_group_id(school, group) for group in device_groups} - {None}
 
     grub_reader = LinboGrubReader()
     configs = grub_reader.get_all_grub_configs(school_groups=school_groups)
@@ -949,14 +1038,17 @@ def host_status(
     logged_hostname = hostname if school == "default-school" else f"{school}-{hostname}"
 
     group = device["group"]
+    group_id = try_get_linbo_group_id(school, group)
     # Empty for a device whose group has no start.conf, or with pxeFlag not in
     # (1, 2): such a host has no image to sync.
-    os_entries = list_workstations(school=school, groups=[group]).get(group, {}).get("os", [])
+    os_entries = []
+    if group_id:
+        os_entries = list_workstations(school=school, groups=[group]).get(group_id, {}).get("os", [])
 
     # group_os() drops the OS display name, so read it back from start.conf.
     os_names = {
         section.get("BaseImage"): section.get("Name")
-        for section in (read_config(group) or [])
+        for section in (read_config(group_id) if group_id else None) or []
     }
 
     images = []
