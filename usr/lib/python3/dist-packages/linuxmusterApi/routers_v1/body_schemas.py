@@ -197,8 +197,9 @@ class PrintPasswordsProjectsParameter(BaseModel):
 
     format: str | None = 'pdf'
     one_per_page: bool | None = False
-    pdflatex: bool | None = False
+    pdflatex: bool | None = True
     school: str | None = ''
+    nosplit_names: bool | None = False
     projects: list
 
 class PrintPasswordsUsersParameter(BaseModel):
@@ -211,8 +212,9 @@ class PrintPasswordsUsersParameter(BaseModel):
 
     format: str | None = 'pdf'
     one_per_page: bool | None = False
-    pdflatex: bool | None = False
+    pdflatex: bool | None = True
     school: str | None = ''
+    nosplit_names: bool | None = False
     users: list
 
 class MgmtList(BaseModel):

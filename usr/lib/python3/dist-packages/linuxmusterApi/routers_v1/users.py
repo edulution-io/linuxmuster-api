@@ -20,6 +20,13 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+CUSTOM_ATTRIBUTES = (
+    [f'sophomorixCustom{i}' for i in range(1, 6)] + [f'sophomorixCustomMulti{i}' for i in range(1, 6)]
+)
+# Attributes which can be emptied. The others identify the user or have a
+# default in the body, so that an empty value only means "not given".
+CLEARABLE_ATTRIBUTES = (*CUSTOM_ATTRIBUTES, 'proxyAddresses', 'thumbnailPhoto')
+
 def check_old_password(request, who, user, old_password):
     """
     A stolen token must not be enough to take the account over: check the
@@ -149,6 +156,8 @@ def post_user_data(user: str, user_details: User, who: AuthenticatedUser = Depen
     - teachers (students)
     - all users (own photo, and the fields the school made editable)
 
+    An empty custom field, *proxyAddresses* or *thumbnailPhoto* is cleared.
+
     \f
     :param user: cn of the user to update
     :type user: basestring
@@ -161,16 +170,27 @@ def post_user_data(user: str, user_details: User, who: AuthenticatedUser = Depen
 
     current = get_user_or_404(user, who.school)
 
-    data = {}
-    for key, value in user_details.__dict__.items():
-        if (key == "thumbnailPhoto" and value is not None) or value:
+    data, to_clear = {}, {}
+    for key in user_details.model_fields_set:
+        value = getattr(user_details, key)
+        if value:
             data[key] = value
+        elif key in CLEARABLE_ATTRIBUTES and value is not None:
+            to_clear[key] = value
 
     if who.user.lower() == user.lower() and who.role not in ('globaladministrator', 'schooladministrator'):
-        data = check_own_attributes(current, data)
+        allowed = check_own_attributes(current, {**data, **to_clear})
+        data = {key: value for key, value in data.items() if key in allowed}
+        to_clear = {key: value for key, value in to_clear.items() if key in allowed}
 
     UserWriter = LMNUser(user.lower(), who.school)
-    UserWriter.setattr(data=data)
+    if data:
+        UserWriter.setattr(data=data)
+
+    # Deleting an attribute which is not set is an error for LDAP
+    to_clear = {key: None for key in to_clear if UserWriter.data.get(key)}
+    if to_clear:
+        UserWriter.delattr(data=to_clear)
 
 
 @router.post("/get_users_from_cn", name="User details")

@@ -16,7 +16,7 @@ router = APIRouter(
 )
 
 # TODO: cenrtalize
-CUSTOMFIELDS = [f'sophomorixCustom{count}' for count in range(1, 5)] + [f'sophomorixCustomMulti{count}' for count in range(1, 5)]
+CUSTOMFIELDS = [f'sophomorixCustom{count}' for count in range(1, 6)] + [f'sophomorixCustomMulti{count}' for count in range(1, 6)]
 
 def check_membergroups_or_4xx(group, membergroups, school):
     """

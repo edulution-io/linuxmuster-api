@@ -1,3 +1,4 @@
+import re
 from unittest.mock import Mock
 
 import pytest
@@ -41,6 +42,9 @@ class FakeImageGroup:
 
 def make_group(name="win11", backups=None, diff=True, usable=True):
     return FakeImageGroup(name=name, backups=backups, diff=diff, usable=usable)
+
+
+INFO = "[win11.qcow2 Info File]\ntimestamp=202601271107\nimage=win11.qcow2\nimagesize=1\npartition=/dev/sda1\npartitionsize=1\n"
 
 
 @pytest.fixture
@@ -254,7 +258,7 @@ def test_save_extras_forwards_the_body_and_targets_the_base_image(manager):
 
     result = linbo.save_image_extras(
         "win11",
-        LinboImageExtrasBody(info="[OS]\ntimestamp=202601271107", desc="Windows 11", reg="[HKLM]"),
+        LinboImageExtrasBody(info=INFO, desc="Windows 11", reg="[HKLM]"),
         None,
         False,
         None,
@@ -275,7 +279,7 @@ def test_save_extras_passes_the_raw_timestamp_not_the_display_date(manager):
 
     linbo.save_image_extras(
         "win11",
-        LinboImageExtrasBody(info="[OS]", desc="a backup"),
+        LinboImageExtrasBody(info=INFO, desc="a backup"),
         BACKUP_TIMESTAMP,
         False,
         None,
@@ -290,7 +294,7 @@ def test_save_extras_rejects_timestamp_and_diff_together(manager):
     with pytest.raises(HTTPException) as error:
         linbo.save_image_extras(
             "win11",
-            LinboImageExtrasBody(info="[OS]", desc="x"),
+            LinboImageExtrasBody(info=INFO, desc="x"),
             BACKUP_TIMESTAMP,
             True,
             None,
@@ -304,7 +308,7 @@ def test_save_extras_404s_for_a_diff_that_does_not_exist(manager):
     manager.groups = {"win11": make_group(diff=False)}
 
     with pytest.raises(HTTPException) as error:
-        linbo.save_image_extras("win11", LinboImageExtrasBody(info="[OS]", desc="x"), None, True, None)
+        linbo.save_image_extras("win11", LinboImageExtrasBody(info=INFO, desc="x"), None, True, None)
 
     assert error.value.status_code == 404
     manager.save_extras.assert_not_called()
@@ -358,7 +362,7 @@ def test_delete_image_deletes_an_unusable_image(manager):
         ),
         pytest.param(
             lambda: linbo.save_image_extras(
-                "win11", LinboImageExtrasBody(info="[OS]"), None, True, None
+                "win11", LinboImageExtrasBody(info=INFO), None, True, None
             ),
             id="extras-diff",
         ),
@@ -418,3 +422,16 @@ def test_image_paths_resolve_to_the_intended_endpoint(method, path, expected):
             assert route.endpoint.__name__ == expected
             return
     pytest.fail(f"{method} {path} matches no route")
+
+
+@pytest.mark.parametrize("change", [
+    # The last occurrence of a key counts
+    lambda info: info + '\nimagesize=""\n',
+    lambda info: re.sub(r'timestamp=.*', 'timestamp="yesterday"', info),
+])
+def test_an_info_the_loader_refuses_is_not_written(manager, change):
+    manager.groups = {"win11": make_group()}
+    with pytest.raises(HTTPException) as error:
+        linbo.save_image_extras("win11", LinboImageExtrasBody(info=change(INFO)), None, False, None)
+    assert error.value.status_code == 400
+    manager.save_extras.assert_not_called()

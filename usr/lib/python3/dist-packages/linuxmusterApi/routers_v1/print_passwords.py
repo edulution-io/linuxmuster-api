@@ -1,9 +1,13 @@
+import fcntl
+import os
 import subprocess
-from fastapi.responses import FileResponse
-from fastapi import APIRouter, Depends, HTTPException
+import zlib
+from contextlib import contextmanager
+
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from security import RoleChecker, AuthenticatedUser, check_print_permissions
-from utils.checks import get_schoolclass_or_404, get_project_or_404
+from utils.checks import get_schoolclass_or_404, get_project_or_404, check_tmp_dir, JOB_DIR
 from .body_schemas import PrintPasswordsSchoolclassesParameter, PrintPasswordsUsersParameter, PrintPasswordsProjectsParameter
 
 
@@ -12,6 +16,62 @@ router = APIRouter(
     tags=["Print passwords"],
     responses={404: {"description": "Not found"}},
 )
+
+PRINT_DIR = '/var/lib/sophomorix/print-data'
+
+# Number of locks the callers are spread over
+PRINT_LOCKS = 64
+
+@contextmanager
+def print_lock(user):
+    """
+    sophomorix names the files after the caller, so one user can only print one
+    thing at a time, whatever worker handles the request.
+    """
+
+
+    check_tmp_dir()
+    path = os.path.join(JOB_DIR, f'print.{zlib.crc32(user.encode()) % PRINT_LOCKS}.lock')
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), 'w') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+def print_file(who, config, filename, **selection):
+    """
+    Run sophomorix-print and return the content of the file it created.
+
+    The files of a previous run are removed first: if the compilation fails
+    without an error, it would be sent instead of the requested one, or
+    converted again from its intermediate files.
+
+    :raises HTTPException 500: the file is missing, e.g. because LaTeX failed
+    """
+
+
+    path = os.path.join(PRINT_DIR, filename)
+
+    with print_lock(who.user):
+        for extension in ('csv', 'pdf', 'ps', 'dvi', 'tex'):
+            old = f'{os.path.splitext(path)[0]}.{extension}'
+            if os.path.isfile(old):
+                os.unlink(old)
+
+        sophomorixprint_cmd(who, config, **selection)
+
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=500, detail=f"{filename} could not be created, see the log of sophomorix-print.")
+
+        with open(path, 'rb') as f:
+            return f.read()
+
+def print_response(who, config, filename, mtype, **selection):
+    """
+    Send the file sophomorix-print created.
+    """
+
+
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return Response(print_file(who, config, filename, **selection), media_type=mtype, headers=headers)
 
 def sophomorixprint_cmd(who, config, schoolclasses=[], users=[]):
     """
@@ -37,13 +97,17 @@ def sophomorixprint_cmd(who, config, schoolclasses=[], users=[]):
         cmd.extend(['--school', who.school])
 
     if schoolclasses:
-        cmd.extend(['--class', ','.join(config.schoolclasses)])
+        cmd.extend(['--class', ','.join(schoolclasses)])
     elif users:
         cmd.extend(['--user', ','.join(users)])
     else:
         raise HTTPException(status_code=400, detail=f"This group does not contain users whose passwords can be printed out.")
 
-    if config.pdflatex:
+    if config.format == 'csv':
+        # The csv files are written before LaTeX runs: a failed PDF must not
+        # fail a csv export. An older sophomorix-print skips the PDF as well.
+        cmd.extend(['--command', 'none'])
+    elif config.pdflatex:
         cmd.extend(['--command', 'pdflatex'])
 
     if config.one_per_page:
@@ -67,7 +131,7 @@ def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, 
         - format: pdf or csv (default pdf),
         - schoolclasses: list of valid schoolclasses,
         - one_per_page: boolean (print one password per page, default false),
-        - pdflatex: booolean (use pdflatex or not, default false),
+        - pdflatex: boolean (use pdflatex or not, default true),
         - school: school of the user, may be necessary for globaladministrators.
 
     ### Access
@@ -95,10 +159,11 @@ def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, 
     else:
         raise HTTPException(status_code=400, detail=f"{config.format} is a wrong format")
 
+    if not config.schoolclasses:
+        raise HTTPException(status_code=400, detail="At least one schoolclass is required.")
+
     for schoolclass in config.schoolclasses:
         get_schoolclass_or_404(schoolclass, who)
-
-    sophomorixprint_cmd(who, config, schoolclasses=schoolclass)
 
     if len(config.schoolclasses) == 1:
         prefix = 'add'
@@ -108,9 +173,7 @@ def print_passwords_schoolclasses(config: PrintPasswordsSchoolclassesParameter, 
         prefix = 'multiclass'
 
     filename = f'{prefix}-{who.user}.{config.format}'
-    file_path = f'/var/lib/sophomorix/print-data/{filename}'
-
-    return FileResponse(path=file_path, filename=filename, media_type=mtype)
+    return print_response(who, config, filename, mtype, schoolclasses=config.schoolclasses)
 
 @router.post("/projects", name="Print passwords from projects")
 def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: AuthenticatedUser = Depends(RoleChecker("GST"))):
@@ -125,7 +188,7 @@ def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: Authe
         - format: pdf or csv (default pdf),
         - projects: list of valid projects,
         - one_per_page: boolean (print one password per page, default false),
-        - pdflatex: booolean (use pdflatex or not, default false),
+        - pdflatex: boolean (use pdflatex or not, default true),
         - school: school of the user, may be necessary for globaladministrators.
 
     ### Access
@@ -163,12 +226,8 @@ def print_passwords_projects(config: PrintPasswordsProjectsParameter, who: Authe
 
     users_to_print = check_print_permissions(who, users_to_print)
 
-    sophomorixprint_cmd(who, config, users=users_to_print)
-
     filename = f'user-{who.user}.{config.format}'
-    file_path = f'/var/lib/sophomorix/print-data/{filename}'
-
-    return FileResponse(path=file_path, filename=filename, media_type=mtype)
+    return print_response(who, config, filename, mtype, users=users_to_print)
 
 
 @router.post("/users", name="Print passwords of users")
@@ -184,7 +243,7 @@ def print_passwords_users(config: PrintPasswordsUsersParameter, who: Authenticat
         - format: pdf or csv (default pdf),
         - users: list of valid user's cn,
         - one_per_page: boolean (print one password per page, default false),
-        - pdflatex: booolean (use pdflatex or not, default false),
+        - pdflatex: boolean (use pdflatex or not, default true),
         - school: school of the user, may be necessary for globaladministrators.
 
     ### Access
@@ -217,11 +276,5 @@ def print_passwords_users(config: PrintPasswordsUsersParameter, who: Authenticat
 
     users_to_print = check_print_permissions(who, users_to_print)
 
-    sophomorixprint_cmd(who, config, users=users_to_print)
-
     filename = f'user-{who.user}.{config.format}'
-    file_path = f'/var/lib/sophomorix/print-data/{filename}'
-
-    return FileResponse(path=file_path, filename=filename, media_type=mtype)
-
-
+    return print_response(who, config, filename, mtype, users=users_to_print)

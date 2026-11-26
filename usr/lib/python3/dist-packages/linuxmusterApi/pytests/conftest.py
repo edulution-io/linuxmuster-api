@@ -23,7 +23,7 @@ for _var, _default in _TEST_DATA_DEFAULTS.items():
 
 sys.path.append(LOCAL_API_PATH)
 from main import app
-from routers_v1 import listmanagement
+from routers_v1 import listmanagement, print_passwords
 from security import revocation
 from security.rate_limiter import request_counters
 from utils import checks, sophomorix
@@ -44,6 +44,6 @@ def run_dir(tmp_path, monkeypatch):
 
     directory = tmp_path / 'lmnapi'
     directory.mkdir()
-    for module in (checks, listmanagement, revocation, sophomorix):
+    for module in (checks, listmanagement, print_passwords, revocation, sophomorix):
         monkeypatch.setattr(module, 'JOB_DIR', str(directory))
     return directory
