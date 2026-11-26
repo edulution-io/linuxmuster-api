@@ -260,6 +260,9 @@ def do_import_devices(school: str, request: Request, response: Response, backgro
 
     With `background=true` it returns the id of a job, see `GET /jobs/{job}`.
 
+    One import runs at a time (devices or subnets): while another one runs,
+    the answer is 409 with the id of its job.
+
     ### Access
     - global-administrators
     - school-administrators

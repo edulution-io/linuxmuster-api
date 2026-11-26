@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -66,7 +67,7 @@ def test_one_job_of_a_kind_and_the_others_go_on():
     assert wait(jobs.start('x', who(), 'abc', lambda: 3, serial='import')['job'])['result'] == 3
 
 
-def test_a_direct_call_waits_for_a_job_of_its_kind():
+def test_a_direct_call_does_not_wait_for_a_job_of_its_kind():
     order, release = [], threading.Event()
 
     def job():
@@ -74,15 +75,37 @@ def test_a_direct_call_waits_for_a_job_of_its_kind():
         release.wait()
 
     job_id = jobs.start('x', who(), 'abc', job, serial='import')['job']
+    # Running only once it holds the lock
     while jobs.get_or_404(job_id, who())['status'] != 'running':
         time.sleep(0.01)
-    direct = threading.Thread(target=jobs.run_or_start, args=(False, None, None, 'x', who(), 'abc', lambda: order.append('direct')), kwargs={'serial': 'import'})
-    direct.start()
-    time.sleep(0.1)
-    assert order == ['job']
+    with pytest.raises(HTTPException) as error:
+        jobs.run_or_start(False, None, None, 'x', who(), 'abc', lambda: order.append('direct'), serial='import')
+    assert error.value.status_code == 409 and error.value.detail['job'] == job_id
     release.set()
-    direct.join()
+    wait(job_id)
+    jobs.run_or_start(False, None, None, 'x', who(), 'abc', lambda: order.append('direct'), serial='import')
     assert order == ['job', 'direct']
+
+
+def test_a_job_waits_for_a_direct_call_of_its_kind():
+    release, started = threading.Event(), threading.Event()
+
+    def direct():
+        started.set()
+        release.wait()
+
+    thread = threading.Thread(target=jobs.run_or_start, args=(False, None, None, 'x', who(), 'abc', direct), kwargs={'serial': 'import'})
+    thread.start()
+    started.wait()
+    job_id = jobs.start('x', who(), 'abc', lambda: 1, serial='import')['job']
+    time.sleep(0.1)
+    assert jobs.get_or_404(job_id, who())['status'] == 'queued'
+    with pytest.raises(HTTPException) as error:
+        jobs.run_or_start(False, None, None, 'x', who(), 'abc', lambda: 2, serial='import')
+    assert error.value.detail['job'] == job_id
+    release.set()
+    thread.join()
+    assert wait(job_id)['result'] == 1
 
 
 def test_a_job_which_cannot_be_finished_does_not_block_its_kind(monkeypatch):
@@ -159,6 +182,8 @@ def test_expired_jobs_and_files_are_gone_on_direct_requests():
     jobs._update(job_id, finishedTime=time.time() - jobs.FILE_RETENTION - 1)
     with pytest.raises(HTTPException):
         jobs.file_or_404(job_id, who())
+    # Removed right away, not at the next cleanup
+    assert not os.path.exists(jobs._path(job_id, 'file'))
     jobs._update(job_id, finishedTime=time.time() - jobs.RETENTION - 1)
     with pytest.raises(HTTPException):
         jobs.get_or_404(job_id, who())
@@ -175,10 +200,23 @@ def test_jobs_and_files_per_user_are_limited(monkeypatch):
     release.set()
 
     monkeypatch.setattr(jobs, 'MAX_FILES', 1)
-    wait(jobs.start('x', who(), 'abc', lambda: jobs.JobFile(b'x', 'a.csv', 'text/csv'))['job'])
+    for _ in range(50):
+        if all(job['status'] in jobs.FINISHED for job in jobs.list_jobs(who())):
+            break
+        time.sleep(0.02)
+    # A running job counts with the file it will create
+    hold = threading.Event()
+    first = jobs.start('x', who(), 'abc', lambda: jobs.JobFile(hold.wait() and b'x', 'a.csv', 'text/csv'), with_file=True)['job']
     with pytest.raises(HTTPException) as error:
-        jobs.check_file_quota(who())
+        jobs.start('x', who(), 'abc', lambda: 1, with_file=True)
     assert error.value.status_code == 429
+    hold.set()
+    wait(first)
+    with pytest.raises(HTTPException) as error:
+        jobs.start('x', who(), 'abc', lambda: 1, with_file=True)
+    assert error.value.status_code == 429
+    # Jobs without a file are not limited by the files
+    assert wait(jobs.start('x', who(), 'abc', lambda: 2)['job'])['result'] == 2
 
 
 def test_old_jobs_are_forgotten(monkeypatch):
@@ -207,6 +245,11 @@ def test_if_match(tmp_path):
     for free in (None, '*'):
         with unchanged_or_412(path, free):
             pass
+    # A weak ETag, e.g. from a proxy which compressed the GET, and a list
+    with unchanged_or_412(path, f'W/{etag(path)}'):
+        pass
+    with unchanged_or_412(path, f'"other", {etag(path)}'):
+        pass
     with unchanged_or_412(tmp_path / 'new.csv', etag(tmp_path / 'new.csv')):
         pass
 

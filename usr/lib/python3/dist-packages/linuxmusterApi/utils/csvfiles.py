@@ -39,6 +39,20 @@ def etag(path):
     return f'"{digest}"'
 
 
+def if_match_tags(if_match):
+    """
+    :param if_match: If-Match header
+    :return: Its ETags, None for no header or '*'. A weak ETag counts as the
+        strong one: a proxy which compresses the answer, e.g. nginx with gzip,
+        hands the ETag of the GET out as a weak one.
+    :rtype: list
+    """
+
+    if if_match is None or if_match.strip() == '*':
+        return None
+    return [tag.strip().removeprefix('W/') for tag in if_match.split(',') if tag.strip()]
+
+
 @contextmanager
 def _csv_lock():
     """The lock of the CSV files, shared by all workers of the API."""
@@ -78,8 +92,9 @@ def unchanged_or_412(path, if_match):
     :raises HTTPException 412: the file changed since it was read
     """
 
+    tags = if_match_tags(if_match)
     with _csv_lock():
-        if if_match not in (None, '*') and etag(path) not in [tag.strip() for tag in if_match.split(',')]:
+        if tags is not None and etag(path) not in tags:
             raise HTTPException(status_code=412, detail=f"{os.path.basename(path)} was changed in the meantime, please read it again.")
         yield
 

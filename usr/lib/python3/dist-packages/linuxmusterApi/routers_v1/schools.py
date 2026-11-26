@@ -12,6 +12,7 @@ from linuxmusterTools.lmnconfig import (
 from linuxmusterTools.quotas import apply_school_quota
 from utils import jobs
 from utils.checks import require_school
+from utils.csvfiles import if_match_tags
 from .body_schemas import CustomFieldsBody, SchoolSettingsBody
 
 
@@ -23,12 +24,37 @@ router = APIRouter(
 
 CUSTOM_FIELD_NUMBERS = ('1', '2', '3', '4', '5')
 
-def _etag(if_match):
+def _etag(if_match, current):
     """
+    :param if_match: If-Match header, may list several ETags
+    :param current: ETag of the file now, linuxmusterTools compares it again
+        under the lock of the file
     :return: The ETag a change is based on, None to write in any case
     """
 
-    return None if if_match in (None, '*') else if_match.strip()
+    tags = if_match_tags(if_match)
+    if tags is None:
+        return None
+    # An ETag no file has, the change is refused
+    return current if current in tags else '""'
+
+def _snapshot(etag, read):
+    """
+    Read a file and its ETag without a change in between, which would make
+    the next PATCH fail with 412 although nobody changed what was read.
+
+    :param etag: Returns the ETag of the file
+    :param read: Returns the content
+    :return: ETag and content
+    :raises HTTPException 503: the file changes all the time
+    """
+
+    for _ in range(5):
+        before = etag()
+        content = read()
+        if etag() == before:
+            return before, content
+    raise HTTPException(status_code=503, detail="The file is being changed, please try again.")
 
 def _custom_fields(school):
     default = {'title': '', 'show': False, 'editable': False}
@@ -126,8 +152,8 @@ def get_school_settings(school: str, response: Response, who: AuthenticatedUser 
 
 
     school_settings = SchoolSettings(school)
-    response.headers['ETag'] = school_settings.etag()
-    return {"settings": school_settings.read(), "schema": school_settings.schema}
+    response.headers['ETag'], settings = _snapshot(school_settings.etag, school_settings.read)
+    return {"settings": settings, "schema": school_settings.schema}
 
 @router.patch("/{school}/settings", name="Change settings of a school")
 @require_school
@@ -162,15 +188,16 @@ def patch_school_settings(school: str, body: SchoolSettingsBody, response: Respo
 
     school_settings = SchoolSettings(school)
     try:
-        settings = school_settings.update(
-            body.settings, allow_restricted=who.role == 'globaladministrator', etag=_etag(if_match),
+        school_settings.update(
+            body.settings, allow_restricted=who.role == 'globaladministrator',
+            etag=_etag(if_match, school_settings.etag()),
         )
     except SchoolSettingsError as error:
         raise HTTPException(status_code=400, detail=error.errors) from error
     except ConfigChangedError as error:
         raise HTTPException(status_code=412, detail="school.conf was changed in the meantime, please read it again.") from error
 
-    response.headers['ETag'] = school_settings.etag()
+    response.headers['ETag'], settings = _snapshot(school_settings.etag, school_settings.read)
     return {"settings": settings}
 
 @router.post("/{school}/quotas/apply", status_code=202, name="Apply the quotas of all users of a school")
@@ -228,8 +255,8 @@ def get_custom_fields(school: str, response: Response, who: AuthenticatedUser = 
     """
 
 
-    response.headers['ETag'] = CustomFieldsConfig.etag(school)
-    return _custom_fields(school)
+    response.headers['ETag'], fields = _snapshot(lambda: CustomFieldsConfig.etag(school), lambda: _custom_fields(school))
+    return fields
 
 @router.patch("/{school}/custom-fields", name="Change the settings of the custom fields")
 @require_school
@@ -270,10 +297,16 @@ def patch_custom_fields(school: str, body: CustomFieldsBody, response: Response,
                     if index not in CUSTOM_FIELD_NUMBERS:
                         raise HTTPException(status_code=400, detail=f"Unknown field {index}, allowed are 1 to 5")
 
+    current = CustomFieldsConfig.etag(school)
+    based_on = _etag(if_match, current)
     try:
-        CustomFieldsConfig.update(school, changes, etag=_etag(if_match))
+        if changes:
+            CustomFieldsConfig.update(school, changes, etag=based_on)
+        # Nothing to write for an empty body, the file stays as it is
+        elif based_on not in (None, current):
+            raise ConfigChangedError('custom_fields.yml changed in the meantime')
     except ConfigChangedError as error:
         raise HTTPException(status_code=412, detail="custom_fields.yml was changed in the meantime, please read it again.") from error
 
-    response.headers['ETag'] = CustomFieldsConfig.etag(school)
-    return _custom_fields(school)
+    response.headers['ETag'], fields = _snapshot(lambda: CustomFieldsConfig.etag(school), lambda: _custom_fields(school))
+    return fields

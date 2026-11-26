@@ -71,12 +71,16 @@ def _locked():
 
 
 @contextmanager
-def serial_lock(serial):
+def serial_lock(serial, wait=True):
     """
     Run one command of a kind at a time, e.g. one import, across all workers.
     Direct calls hold it as well as jobs.
 
     :param serial: Key of the kind of command
+    :param wait: False for a direct call: it does not wait for the lock, which
+        would hold a thread of the server for as long as the other command runs
+    :raises HTTPException 409: wait is False and the lock is held, the id of
+        the job holding it is in the detail, None for another direct call
     """
 
     if not _SERIAL_PATTERN.fullmatch(serial):
@@ -84,8 +88,26 @@ def serial_lock(serial):
     os.makedirs(_job_dir(), mode=0o700, exist_ok=True)
     path = os.path.join(_job_dir(), f'serial.{serial}.lock')
     with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise HTTPException(
+                status_code=409,
+                detail={'message': 'The same command is already running.', 'job': _unfinished(serial)},
+            ) from None
         yield
+
+
+def _unfinished(serial):
+    """
+    :return: Id of the job of this kind which is not finished, None if there is none
+    """
+
+    with _locked():
+        for job in _all():
+            if job.get('serial') == serial and job['status'] not in FINISHED:
+                return job['id']
+    return None
 
 
 def _process():
@@ -217,7 +239,7 @@ def _own(job, who):
     return job.get('owner', f"name:{job['caller'].lower()}") == _owner(who)
 
 
-def create(job_type, who, school, job_id=None, serial=None):
+def create(job_type, who, school, job_id=None, serial=None, with_file=False):
     """
     Register a job.
 
@@ -228,10 +250,12 @@ def create(job_type, who, school, job_id=None, serial=None):
     :param job_id: Own id, generated if not given
     :param serial: Key of the kind of command, see serial_lock(). Only one
         such job can be queued or running.
+    :param with_file: The job creates a file, see JobFile. It counts towards
+        the files of the user from the start.
     :return: Id of the job
     :raises HTTPException 409: a job with the same serial key is not finished,
         its id is in the detail
-    :raises HTTPException 429: the user has too many jobs
+    :raises HTTPException 429: the user has too many jobs or files
     """
 
     cleanup()
@@ -242,6 +266,7 @@ def create(job_type, who, school, job_id=None, serial=None):
         'caller': who.user,
         'owner': _owner(who),
         'serial': serial,
+        'withFile': with_file,
         'process': _process(),
         'status': QUEUED,
         'created': _now(),
@@ -263,6 +288,10 @@ def create(job_type, who, school, job_id=None, serial=None):
         own = [other for other in existing if _own(other, who)]
         if sum(other['status'] not in FINISHED for other in own) >= MAX_UNFINISHED:
             raise HTTPException(status_code=429, detail='Too many unfinished jobs, please wait for them.')
+        # Stored files, and the files of the jobs still running
+        files = sum(bool(other.get('file')) or (other.get('withFile') and other['status'] not in FINISHED) for other in own)
+        if with_file and files >= MAX_FILES:
+            raise HTTPException(status_code=429, detail='Too many files, please download or delete older jobs first.')
         _write(job)
     return job['id']
 
@@ -303,7 +332,7 @@ def fail(job_id, error):
     return True
 
 
-def start(job_type, who, school, function, serial=None, notifications_config=None):
+def start(job_type, who, school, function, serial=None, notifications_config=None, with_file=False):
     """
     Run a function as a job.
 
@@ -311,11 +340,12 @@ def start(job_type, who, school, function, serial=None, notifications_config=Non
         HTTPException becomes the error of the job, with its status.
         A JobFile is offered for download.
     :param serial: See create()
+    :param with_file: See create()
     :return: Body of the 202 response
     :rtype: dict
     """
 
-    job_id = create(job_type, who, school, serial=serial)
+    job_id = create(job_type, who, school, serial=serial, with_file=with_file)
 
     def run():
         # Nothing may escape: the executor would swallow it and the job would
@@ -337,25 +367,28 @@ def start(job_type, who, school, function, serial=None, notifications_config=Non
     return {'job': job_id}
 
 
-def run_or_start(background, response, request, job_type, who, school, function, serial=None):
+def run_or_start(background, response, request, job_type, who, school, function, serial=None, with_file=False):
     """
     Existing endpoints answer when they are done, unless the client asks for a
     job. See start().
+
+    :raises HTTPException 409: a command of the same kind is running, see
+        serial_lock()
     """
 
     if not background:
         if serial:
-            with serial_lock(serial):
+            with serial_lock(serial, wait=False):
                 return function()
         return function()
     response.status_code = 202
-    return start_for(request, job_type, who, school, function, serial=serial)
+    return start_for(request, job_type, who, school, function, serial=serial, with_file=with_file)
 
 
-def start_for(request, job_type, who, school, function, serial=None):
+def start_for(request, job_type, who, school, function, serial=None, with_file=False):
     return start(
         job_type, who, school, function, serial=serial,
-        notifications_config=request.app.state.notifications,
+        notifications_config=request.app.state.notifications, with_file=with_file,
     )
 
 
@@ -394,20 +427,6 @@ class JobFile:
     def write(self, target):
         with open(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as f:
             f.write(self.content)
-
-
-def check_file_quota(who):
-    """
-    Refuse a further job with a file while the user has too many files stored.
-
-    :raises HTTPException 429: too many files
-    """
-
-    cleanup()
-    with _locked():
-        files = [job for job in _all() if _own(job, who) and job.get('file')]
-    if len(files) >= MAX_FILES:
-        raise HTTPException(status_code=429, detail='Too many files, please download or delete older jobs first.')
 
 
 def _visible(job, who):
@@ -450,6 +469,10 @@ def file_or_404(job_id, who):
 
     job = get_or_404(job_id, who)
     path = _path(job_id, 'file')
+    if _own(job, who) and _file_expired(job):
+        # Not kept until the next cleanup, it may contain passwords
+        with _locked():
+            _remove_file(job)
     if not _own(job, who) or not job['file'] or _file_expired(job) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail=f"Job {job_id} has no file.")
     return path, job['file']['name'], job['file']['type']

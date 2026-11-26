@@ -63,7 +63,7 @@ def get_job_file(job: str, who: AuthenticatedUser = Depends(RoleChecker("ALL")))
     """
     ## Download the file a job created.
 
-    It is deleted with the job, after a day at the latest.
+    It is kept for an hour after the job finished, and deleted with the job.
 
     ### Access
     - all users (own jobs)
@@ -86,7 +86,6 @@ def delete_job(job: str, who: AuthenticatedUser = Depends(RoleChecker("ALL"))):
 
     ### Access
     - global-administrators (all jobs)
-    - school-administrators (jobs of their school)
     - all users (own jobs)
 
     \f

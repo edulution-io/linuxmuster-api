@@ -54,6 +54,18 @@ def new_job_log(prefix):
     os.close(handle)
     return logpath, os.path.basename(logpath).removesuffix('.sophomorix.log')
 
+def create_job_or_remove_log(job_type, who, school, pid, logpath):
+    """
+    Register the job of a log created by new_job_log(), the log is removed if
+    the job is refused (e.g. 429).
+    """
+
+    try:
+        jobs.create(job_type, who, school, job_id=pid)
+    except Exception:
+        os.unlink(logpath)
+        raise
+
 @router.get("/{school}/{mgmtlist}", name="Get the content of a specific management list")
 @require_school
 def get_management_list_content(school: str, mgmtlist: str, response: Response, who: AuthenticatedUser = Depends(RoleChecker("GS"))):
@@ -157,7 +169,7 @@ def do_sophomorix_check(background_tasks: BackgroundTasks, request: Request, who
     check_tmp_dir()
 
     logpath, pid = new_job_log(f'{who.school}.check.')
-    jobs.create('sophomorix-check', who, who.school, job_id=pid)
+    create_job_or_remove_log('sophomorix-check', who, who.school, pid, logpath)
 
     # -jj writes its JSON payload to stderr (see lmn_getSophomorixValue),
     # so both streams need to land in logpath, not just stdout.
@@ -228,7 +240,7 @@ def do_sophomorix_apply(
         script += f'sophomorix-kill --school {school} >> {logpath};'
         commands_run.append('sophomorix-kill')
 
-    jobs.create('sophomorix-apply', who, school, job_id=pid)
+    create_job_or_remove_log('sophomorix-apply', who, school, pid, logpath)
 
     try:
         background_tasks.add_task(

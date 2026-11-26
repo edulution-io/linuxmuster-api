@@ -114,6 +114,9 @@ def do_import_subnets(who: AuthenticatedUser = Depends(RoleChecker("G"))):
 
     Deprecated, since a GET should not change the server: use POST.
 
+    One import runs at a time (devices or subnets): while another one runs,
+    the answer is 409 with the id of its job.
+
     This regenerates the DHCP, ntp and netplan configuration from
     /etc/linuxmuster/subnets.csv and restarts the affected services.
 
@@ -128,7 +131,7 @@ def do_import_subnets(who: AuthenticatedUser = Depends(RoleChecker("G"))):
     """
 
 
-    with jobs.serial_lock('import'):
+    with jobs.serial_lock('import', wait=False):
         return import_subnets()
 
 @router.post("/import-subnets", status_code=202, name="Run linuxmuster-import-subnets in a job")

@@ -17,6 +17,23 @@ from . import jobs
 password_policy_provider = PasswordPolicyProvider()
 
 
+def protected_accounts(request):
+    """
+    :return: Names from accounts.protected in config.yml, e.g. the bind user
+        an installation logs in with
+    :rtype: list
+    :raises HTTPException 500: the setting is no list of names, nothing is
+        deleted then
+    """
+
+    protected = request.app.state.accounts.get('protected') or []
+    if isinstance(protected, str):
+        protected = [protected]
+    if not isinstance(protected, list) or not all(isinstance(name, str) for name in protected):
+        raise HTTPException(status_code=500, detail="accounts.protected in config.yml must be a list of account names.")
+    return protected
+
+
 def create_account_job(request, who, account_type, name, account, school=None):
     """
     Create an administrator or a bind user in a job, whose result is the name
@@ -81,8 +98,7 @@ def delete_account_job(request, who, account_type, name):
     if name.lower() == who.user.lower():
         raise HTTPException(status_code=400, detail="You can not delete your own account.")
 
-    # e.g. the bind user an installation logs in with
-    protected = request.app.state.accounts.get('protected', []) or []
+    protected = protected_accounts(request)
 
     try:
         check_deletable(account_type, name, protected)
