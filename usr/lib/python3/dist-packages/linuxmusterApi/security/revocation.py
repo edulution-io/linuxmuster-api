@@ -45,7 +45,14 @@ def revoke(token, expires):
     now = time.time()
     for entry in os.scandir(directory):
         try:
-            if entry.stat().st_mtime < now:
+            stat = entry.stat()
+            # A file another worker is still writing has its creation time,
+            # not yet the expiry. Only one left behind by a crash is removed.
+            if entry.name.endswith('.tmp'):
+                expired = stat.st_ctime < now - 60
+            else:
+                expired = stat.st_mtime < now
+            if expired:
                 os.unlink(entry.path)
         except FileNotFoundError:
             # Another worker was faster
